@@ -4,6 +4,8 @@ param(
     [string]$LogDir = (Join-Path $env:USERPROFILE "ai-stack-logs"),
     [switch]$AutoUpdate,
     [switch]$Bench,
+    [switch]$FixCudnn,
+    [switch]$NoFixCudnn,
     [switch]$ForceNotify,
     [switch]$DryRun
 )
@@ -36,11 +38,19 @@ function Write-Log([string]$text) {
 Remove-Item $reportPath, $autoSummaryPath -Force -ErrorAction SilentlyContinue
 
 Write-Log ("`n===== {0:yyyy-MM-dd HH:mm:ss} =====" -f (Get-Date))
-Write-Log ("Mode: AutoUpdate={0} DryRun={1} Bench={2}" -f $AutoUpdate, $DryRun, $Bench)
+Write-Log ("Mode: AutoUpdate={0} DryRun={1} Bench={2} FixCudnn={3}" -f $AutoUpdate, $DryRun, $Bench, $FixCudnn)
+
+# cuDNN 自動補檔：預設「提權排程工作存在就開」（-NoFixCudnn 可關、-FixCudnn 可強制開）
+$CudnnSyncTask = 'AI Stack cuDNN Sync'
+$syncTaskExists = $false
+try { $syncTaskExists = [bool](Get-ScheduledTask -TaskName $CudnnSyncTask -ErrorAction SilentlyContinue) } catch { }
+$useFix = ($FixCudnn -or ($syncTaskExists -and -not $NoFixCudnn))
+Write-Log ("cuDNN sync task '{0}' present: {1} | pass --fix-cudnn: {2}" -f $CudnnSyncTask, $syncTaskExists, $useFix)
 
 # 1) 版本檢查（一律先做；--runtime 會匯入 torch 實測 CUDA 與 cuDNN）
 $checkArgs = @("-u", $Script, "--json-out", $reportPath, "--runtime")
 if ($Bench -and -not $AutoUpdate) { $checkArgs += "--bench" }
+if ($useFix) { $checkArgs += "--fix-cudnn" }
 $output = & $Python @checkArgs 2>&1
 $code = $LASTEXITCODE
 $output | ForEach-Object { Write-Log ([string]$_) }

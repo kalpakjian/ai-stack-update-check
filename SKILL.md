@@ -1,10 +1,10 @@
 ---
 name: ai-stack-update-check
-description: "檢查本機 AI 堆疊是否有新版：Python 預設版本、PyTorch/CUDA wheel、cuDNN（裝好未／版本／有沒有完整複製進 CUDA 目錄）、torchvision、torchaudio、torchcodec、transformers、datasets、accelerate、numpy、pandas、Ollama 與 GPU 驅動；可用 --runtime 實測 CUDA 與 cuDNN、--bench 跑 GPU 效能基準。WHEN: 檢查更新, 睇下有冇新版, 版本檢查, Python 版本, 最新版本, PyTorch 有冇更新, CUDA wheel 版本, cuDNN 版本, cuDNN 有冇裝好, cudnn 裝好未, cuDNN 複製, cuDNN 抄過去未, include 漏咗, GPU 效能, 跑分, benchmark, TFLOPS, cuDNN 優化, 有冇變慢, torch 版本, transformers 版本, Ollama 更新, 套件過期, outdated, update check, version check, upgrade check, 依家裝咗咩版本, 個 stack 更唔更新. DO NOT USE FOR: 直接執行升級安裝（除非用戶明確要求，照輸出指令做）、一般 pip list／pip freeze 查詢、非 AI 套件的版本管理、切換 Python 直譯器（用 py launcher 或 uv）。"
+description: "檢查本機 AI 堆疊是否有新版：Python 預設版本、PyTorch/CUDA wheel、cuDNN（裝好未／版本／有沒有完整複製進 CUDA 目錄／可自動補檔）、torchvision、torchaudio、torchcodec、transformers、datasets、accelerate、numpy、pandas、Ollama 與 GPU 驅動；可用 --runtime 實測 CUDA 與 cuDNN、--bench 跑 GPU 效能基準、--fix-cudnn 觸發提權工作補檔。WHEN: 檢查更新, 睇下有冇新版, 版本檢查, Python 版本, 最新版本, PyTorch 有冇更新, CUDA wheel 版本, cuDNN 版本, cuDNN 有冇裝好, cudnn 裝好未, cuDNN 複製, cuDNN 抄過去未, include 漏咗, cuDNN 補檔, GPU 效能, 跑分, benchmark, TFLOPS, cuDNN 優化, 有冇變慢, torch 版本, transformers 版本, Ollama 更新, 套件過期, outdated, update check, version check, upgrade check, 依家裝咗咩版本, 個 stack 更唔更新. DO NOT USE FOR: 直接執行升級安裝（除非用戶明確要求，照輸出指令做）、一般 pip list／pip freeze 查詢、非 AI 套件的版本管理、切換 Python 直譯器（用 py launcher 或 uv）。"
 license: MIT
 metadata:
   author: local
-  version: "2.3.0"
+  version: "2.4.0"
   root: "C:\\Users\\princ"
 ---
 
@@ -52,6 +52,9 @@ python C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\check_stack.p
 
 # 單獨跑基準（含 TF32／fp16／channels_last／cudnn.benchmark 對照）
 python C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\bench_gpu.py
+
+# cuDNN 檔缺了要自動補（需先一次性註冊提權排程工作，見「cuDNN 自動補檔」）
+python C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\check_stack.py --fix-cudnn
 ```
 
 > ⚠️ 用 `py -3.15 ...` 跑，檢查的就是 3.15 那個解譯器，不是你的預設環境。
@@ -314,6 +317,38 @@ python -m pip install --upgrade torchaudio torchcodec
 winget upgrade Ollama.Ollama
 ```
 
+## cuDNN 自動補檔（一次性設定）
+
+`Program Files` 需要管理員權限，所以「把 cuDNN 檔抄進 CUDA 目錄」不能由非提權的每日排程直接做。
+做法是註冊一個**最高權限**的專用排程工作，之後非提權的行程用 `schtasks /run` 觸發它
+（自己啟動自己的工作不會跳 UAC），補檔就能自動化。
+
+```powershell
+# ① 一次性（系統管理員）：註冊提權工作
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\register_cudnn_sync_task.ps1
+
+# ② 之後任何時候（不需要管理員）
+python scripts\check_stack.py --fix-cudnn     # 偵測到缺檔 → 觸發工作 → 等它跑完 → 重新掃描
+powershell -File scripts\run_daily.ps1        # 偵測到工作存在就自動帶 --fix-cudnn
+
+# ③ 手動測試／看日誌／移除
+schtasks /run /tn "AI Stack cuDNN Sync"
+Get-Content "$env:USERPROFILE\ai-stack-logs\cudnn-sync-YYYY-MM-DD.log"
+powershell -File scripts\register_cudnn_sync_task.ps1 -Unregister
+```
+
+| 檔案 | 角色 |
+|---|---|
+| `scripts\sync_cudnn.ps1` | 提權工作本體：自動探索所有 `CUDNN\v*` ↔ `CUDA\v*` 配對、只補缺的、幂等、可 `-WhatIf` |
+| `scripts\register_cudnn_sync_task.ps1` | 一次性註冊／移除（`-Unregister`）／預覽（`-DryRun`，非管理員會直接拒絕） |
+
+行為細節：
+
+- `sync_cudnn.ps1` 退出碼：`0` 沒有要補的、`1` 有補檔、`2` 錯誤（含非提權造成的 access denied）。
+- `bin` 的目的地會優先選「已經有 cudnn DLL」的那個（`bin\` 或 `bin\x64\`），沒有才依佈局建立。
+- `run_daily.ps1` 的規則是「**工作存在就自動開**」：`-FixCudnn` 強制開、`-NoFixCudnn` 關掉。
+- 沒註冊工作時，檢查只會警告＋給手動指令（不會壞掉），`Notes` 會提示去跑註冊腳本。
+
 ## GPU 效能基準（bench_gpu.py）
 
 `bench_gpu.py` 量五件事，全部實際操 GPU（輸出全英文）：
@@ -375,6 +410,8 @@ python scripts\bench_gpu.py --quick --json-out bench.json    # 快速（升級�
 5. **用預設 `python` 執行**：否則檢查到的是另一個解譯器。
 6. **需要網路**才能判斷新版本；離線請加 `--no-network`（只列已安裝）。
 7. **Windows 專用**：CUDA wheel 探測寫死 `win_amd64`；Ollama 與 `nvidia-smi` 也是本機路徑。
+8. **寫 `Program Files` 一律走提權排程工作**：非提權行程不直接寫 `Program Files`；
+   需要補 cuDNN 檔時觸發「AI Stack cuDNN Sync」（見「cuDNN 自動補檔」）。
 
 ## 故障排除
 
@@ -389,6 +426,9 @@ python scripts\bench_gpu.py --quick --json-out bench.json    # 快速（升級�
 | `cuDNN: not available` | torch 載不到 cuDNN（版本不匹配／DLL 載入失敗） | 重裝對應索引的 torch（`--index-url https://download.pytorch.org/whl/cu132`）；**不要**手動複製 cuDNN |
 | `cuDNN: present (not verified)` | 這次沒加 `--runtime` | 加 `--runtime` 就會有版本並變成 `ok` |
 | `cuDNN: check failed` | `--runtime` 連 torch 都匯入失敗 | 先修 torch（看同一行的錯誤訊息） |
+| `cuDNN auto-fix: scheduled task ... is not registered` | 還沒做一次性註冊 | 以管理員跑 `scripts\register_cudnn_sync_task.ps1` |
+| 補檔後仍有 `access denied` | 工作不是最高權限執行 | 重新註冊（`-Force` 已內建）並確認 `RunLevel=Highest` |
+| 工作跑了但檔案還是缺 | 來源路徑或版本層不對 | 看 `%USERPROFILE%\ai-stack-logs\cudnn-sync-*.log` 的 `SOURCE MISSING`／`FAIL` |
 
 ## 相關檔案
 
@@ -398,6 +438,8 @@ python scripts\bench_gpu.py --quick --json-out bench.json    # 快速（升級�
 | [scripts/run_daily.ps1](scripts/run_daily.ps1) | 每日 23:00 排程包裝：檢查、自動升級、回滾、日誌、toast |
 | [scripts/auto_update.py](scripts/auto_update.py) | 升級執行器：快照 → pip 升級 → 煙霧測試 → 失敗回滾（`--bench` 可加升級前後效能對比） |
 | [scripts/bench_gpu.py](scripts/bench_gpu.py) | GPU 效能基準：cuBLAS／cuDNN／cudnn.benchmark／SDPA／HF 基線（`--quick`、`--json-out`） |
+| [scripts/sync_cudnn.ps1](scripts/sync_cudnn.ps1) | 提權工作本體：把缺的 cuDNN 檔補進 `CUDA\v*`（幂等、`-WhatIf`、寫 `cudnn-sync-*.log`） |
+| [scripts/register_cudnn_sync_task.ps1](scripts/register_cudnn_sync_task.ps1) | 一次性註冊／移除提權排程工作「AI Stack cuDNN Sync」（需管理員） |
 | [scripts/notify.ps1](scripts/notify.ps1) | Windows toast 通知（WinRT，免外部模組） |
 | `C:\\Users\\princ\\.agents\\skills\\authoring-agent-skills` | skill 撰寫／驗證規範 |
 
@@ -405,6 +447,7 @@ python scripts\bench_gpu.py --quick --json-out bench.json    # 快速（升級�
 
 | 版本 | 日期 | 變更 |
 |---|---|---|
+| 2.4.0 | 2026-10-22 | 新增 **cuDNN 自動補檔**：`sync_cudnn.ps1`（提權工作本體）＋`register_cudnn_sync_task.ps1`（一次性註冊「AI Stack cuDNN Sync」）＋`check_stack.py --fix-cudnn`／`run_daily.ps1`（工作存在就自動觸發），解決「非提權行程不能寫 Program Files」的斷點 |
 | 2.3.0 | 2026-10-22 | 新增 **GPU 效能基準** `bench_gpu.py`（cuBLAS／cuDNN／cudnn.benchmark／SDPA／HF 基線＋本機基線表）；`check_stack.py --bench` 把基準放進報告；`auto_update.py --bench` 升級前後各跑一次並輸出 `bench_delta`；`run_daily.ps1 -Bench` 串起兩者 |
 | 2.2.0 | 2026-10-22 | 新增 **CUDA 目錄 cuDNN 齊全度**檢查：比對 `CUDNN\v*` 與 `CUDA\v*` 的 `bin`／`include`／`lib\x64`（檔名＋大小），缺檔進 `warnings` 並給複製指令；新增 `cuda_cudnn` JSON 欄位 |
 | 2.1.0 | 2026-10-22 | 新增 **cuDNN 檢查**：預設掃 `torch\lib` 檔案、`--runtime` 用官方 API 實測（含實際載入的 cudnn DLL 與 GPU 卷積）；新增 `cuDNN` 表格列、`cudnn`／`runtime_detail`／`warnings` JSON 區塊；煙霧測試加 cuDNN 卷積（CUDA 可用但 cuDNN 不可用即回滾）；排程改用 `--runtime` 並在狀態檔寫 `CUDNN_PROBLEM` |

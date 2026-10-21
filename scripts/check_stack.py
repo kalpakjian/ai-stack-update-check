@@ -10,6 +10,7 @@ torchcodec、transformers、datasets、accelerate、numpy、pandas、Ollama、GP
     python check_stack.py --json          # JSON 輸出（給程式用）
     python check_stack.py --runtime       # 額外匯入 torch 驗證 CUDA 與 cuDNN
     python check_stack.py --bench         # 另跑 GPU 效能基準（約 1 分鐘）
+    python check_stack.py --fix-cudnn     # cuDNN 檔缺了就用提權排程工作自動補（需先註冊）
 
 cuDNN 說明：cuDNN 隨 torch wheel 一起安裝（Windows 在 `torch\\lib\\cudnn*.dll`，
 Linux 在 `nvidia-cudnn-*`），**不是**可以獨立 pip 升級的套件，所以本工具只檢查
@@ -41,6 +42,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -63,6 +65,8 @@ CUDNN_ROOT = os.path.join(PROGRAM_FILES, "NVIDIA", "CUDNN")
 CUDA_TOOLKIT_ROOT = os.path.join(PROGRAM_FILES, "NVIDIA GPU Computing Toolkit", "CUDA")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BENCH_SCRIPT = os.path.join(SCRIPT_DIR, "bench_gpu.py")
+CUDNN_SYNC_TASK = "AI Stack cuDNN Sync"
+REGISTER_TASK_SCRIPT = os.path.join(SCRIPT_DIR, "register_cudnn_sync_task.ps1")
 
 
 # ----------------------------------------------------------------- helpers
@@ -257,6 +261,45 @@ def cuda_cudnn_copies():
     return results
 
 
+def cudnn_sync_task_state():
+    """回傳提權排程工作的狀態（'Ready'／'Running'…）；不存在回 None。"""
+    code = ("$t = Get-ScheduledTask -TaskName '%s' -ErrorAction SilentlyContinue;"
+            "if ($t) { $t.State } else { 'MISSING' }" % CUDNN_SYNC_TASK)
+    out = run_cmd(["powershell", "-NoProfile", "-NonInteractive", "-Command", code],
+                  timeout=20)
+    state = (out or "").strip()
+    return None if (not state or state == "MISSING") else state
+
+
+def fix_cudnn_copies():
+    """觸發提權排程工作，把缺的 cuDNN 檔補進 CUDA 目錄（需先註冊該工作）。
+
+    非提權的檢查行程本身不能寫 Program Files；這個排程工作以最高權限執行，
+    所以用它當「按需提權」的通道（自己啟動自己的工作不會跳 UAC）。
+    """
+    result = {"task": CUDNN_SYNC_TASK, "triggered": False, "state_before": None,
+              "state_after": None, "seconds": None}
+    state = cudnn_sync_task_state()
+    result["state_before"] = state
+    if not state:
+        result["error"] = ("scheduled task '%s' is not registered; run %s as "
+                           "administrator once" % (CUDNN_SYNC_TASK,
+                                                   os.path.basename(REGISTER_TASK_SCRIPT)))
+        return result
+    started = time.time()
+    if run_cmd(["schtasks", "/run", "/tn", CUDNN_SYNC_TASK], timeout=30) is None:
+        result["error"] = "schtasks /run failed (is the task enabled?)"
+        return result
+    result["triggered"] = True
+    while time.time() - started < 600:
+        time.sleep(2)
+        if cudnn_sync_task_state() != "Running":
+            break
+    result["seconds"] = round(time.time() - started, 1)
+    result["state_after"] = cudnn_sync_task_state()
+    return result
+
+
 def run_bench(quick=False):
     """跑 scripts/bench_gpu.py（子行程）並回傳它的 JSON；失敗回 {'error': ...}。
 
@@ -431,7 +474,7 @@ def compare_status(installed, latest):
     return "up to date" if vparse(installed) >= vparse(latest) else "update available"
 
 
-def build_report(local, remote, runtime=None, runtime_detail=None, bench=None):
+def build_report(local, remote, runtime=None, runtime_detail=None, bench=None, fix=None):
     rows, notes, updates, warnings, cmds = [], [], [], [], []
     pypi = remote.get("pypi") or {}
     py_info = remote.get("python") or {}
@@ -566,6 +609,15 @@ def build_report(local, remote, runtime=None, runtime_detail=None, bench=None):
                 cmds.append("# %s: copy the missing files (elevated shell), e.g. "
                             "Copy-Item '%s\\*' '%s\\' -Force"
                             % (label, first["source"], first["dest"]))
+            if cudnn_sync_task_state():
+                notes.append("%s: rerun with --fix-cudnn to let the elevated task '%s' "
+                             "copy the missing files automatically."
+                             % (label, CUDNN_SYNC_TASK))
+            else:
+                notes.append("%s: run %s as administrator once; afterwards "
+                             "--fix-cudnn (and run_daily.ps1) can repair this "
+                             "automatically." % (label,
+                                                 os.path.basename(REGISTER_TASK_SCRIPT)))
 
     ollama_inst = (local.get("ollama") or {}).get("version")
     ollama_remote = (remote.get("ollama") or {}).get("version")
@@ -596,6 +648,14 @@ def build_report(local, remote, runtime=None, runtime_detail=None, bench=None):
         target = "cp%d%d" % vparse(py_latest)[:2] if vparse(py_latest) else "cp3xx"
         cmds.append("# Python %s: do not upgrade yet; wait for a torch %s wheel"
                     % (py_latest, target))
+
+    if fix:
+        if fix.get("error"):
+            warnings.append("cuDNN auto-fix: " + str(fix["error"]))
+        else:
+            notes.append("cuDNN auto-fix: triggered '%s' (%s s, state %s -> %s)."
+                         % (fix["task"], fix["seconds"], fix["state_before"],
+                            fix["state_after"]))
 
     if bench:
         if bench.get("error"):
@@ -630,6 +690,7 @@ def build_report(local, remote, runtime=None, runtime_detail=None, bench=None):
         },
         "runtime_detail": detail or None,
         "cuda_cudnn": local.get("cuda_cudnn") or [],
+        "cudnn_fix": fix,
         "bench": bench,
         "warnings": warnings,
         "commands": cmds,
@@ -770,6 +831,8 @@ def main(argv=None):
     parser.add_argument("--json", action="store_true", help="JSON output")
     parser.add_argument("--runtime", action="store_true",
                         help="import torch and verify CUDA + cuDNN availability")
+    parser.add_argument("--fix-cudnn", action="store_true",
+                        help="trigger the elevated 'AI Stack cuDNN Sync' task when copies are incomplete")
     parser.add_argument("--bench", action="store_true",
                         help="also run scripts/bench_gpu.py (GPU benchmark, slow)")
     parser.add_argument("--bench-quick", action="store_true",
@@ -781,6 +844,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     local = local_snapshot()
+    fix = None
+    if args.fix_cudnn:
+        incomplete = [c for c in (local.get("cuda_cudnn") or [])
+                      if c.get("status") == "incomplete"]
+        if incomplete:
+            fix = fix_cudnn_copies()
+            local = local_snapshot()
     remote = {"offline": args.no_network}
 
     if not args.no_network:

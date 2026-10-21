@@ -42,6 +42,9 @@ This tool answers three questions in one pass:
 - **cuDNN copy check** — compares `CUDNN\v*` against `CUDA\v*` so a forgotten
   `include` (or a forgotten CUDA-version folder in the installer path) shows up
   as a warning instead of a silent gap.
+- **Self-healing cuDNN copies** — one elevated scheduled task (registered once)
+  lets the non-elevated daily job repair the CUDA toolkit layout on demand
+  (`--fix-cudnn`), because `Program Files` needs administrator rights.
 - **GPU benchmark** — `bench_gpu.py` measures cuBLAS matmul (TF32 on/off, fp16,
   bf16), cuDNN convolutions (fp32/TF32/fp16, `channels_last`), the
   `cudnn.benchmark` autotune, flash attention, and two cached HF baselines.
@@ -111,6 +114,7 @@ powershell -File scripts\run_daily.ps1 -AutoUpdate -Bench
 | `--runtime` | Import torch and verify CUDA **and cuDNN** availability (slower) |
 | `--bench` | Also run the GPU benchmark (`scripts/bench_gpu.py`) |
 | `--bench-quick` | With `--bench`: fast subset (no HF baselines) |
+| `--fix-cudnn` | If cuDNN files are missing from the CUDA toolkit, trigger the elevated `AI Stack cuDNN Sync` task and re-scan |
 | `--no-network` | Skip online checks; only list installed versions |
 
 Exit codes: `0` = no actionable updates (a Python upgrade blocked by torch still
@@ -236,6 +240,33 @@ hashing of the GB-sized static libs):
 layout has an extra CUDA-version folder (`bin\13.2\x64`, `include\13.2`); omitting
 it matches **zero** files and copies nothing — silently. That is how `include`
 ends up missing most of the time.
+
+### Automating the copy (one-time setup)
+
+Copying into `C:\Program Files\...` needs administrator rights, and the daily task
+runs unelevated. The fix is a dedicated **highest-privilege** scheduled task that
+the unelevated job can start on demand (`schtasks /run` on your own task does not
+raise a UAC prompt):
+
+```powershell
+# (1) once, as administrator
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\register_cudnn_sync_task.ps1
+
+# (2) from then on, no elevation needed
+python scripts\check_stack.py --fix-cudnn     # detect -> trigger the task -> wait -> re-scan
+powershell -File scripts\run_daily.ps1        # auto-adds --fix-cudnn when the task exists
+
+# (3) manual test / log / removal
+schtasks /run /tn "AI Stack cuDNN Sync"
+Get-Content "$env:USERPROFILE\ai-stack-logs\cudnn-sync-YYYY-MM-DD.log"
+powershell -File scripts\register_cudnn_sync_task.ps1 -Unregister
+```
+
+`scripts\sync_cudnn.ps1` (the task body) discovers every `CUDNN\v*` ↔ `CUDA\v*`
+pair, copies only what is missing, is idempotent, supports `-WhatIf`, and exits
+`0` (nothing to do) / `1` (copied) / `2` (error, e.g. not elevated).
+`run_daily.ps1` enables the fix automatically when the task is registered
+(`-FixCudnn` forces it, `-NoFixCudnn` disables it).
 
 ## How rollback works
 
@@ -370,6 +401,10 @@ cuDNN 隨 torch wheel 一起安裝（`torch\lib\cudnn*.dll`），不能單獨 pi
 工具只檢查「裝好了沒、版本多少」：預設掃檔案，加 `--runtime` 才用
 `torch.backends.cudnn.is_available()`／`version()` 實測，並回報實際載入的 DLL 與
 一次真的走 cuDNN 的 GPU 卷積。
+
+另外它也會比對 `CUDNN\v*` 與 `CUDA\v*` 的 `bin`／`include`／`lib\x64`：cuDNN 裝好後
+還要**手動複製**到 CUDA 目錄，漏抄不會報錯。這一步需要管理員權限，所以提供
+「一次性註冊提權排程工作」的做法——註冊後 `--fix-cudnn` 就能自動補檔，不必再手動。
 
 可選的自動更新模式會在升級前快照、升級後跑 GPU 煙霧測試與 `pip check`，失敗時
 自動回滾到原本版本。搭配 Windows 工作排程器可每天固定時間執行，並用 toast 通知
