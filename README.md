@@ -42,6 +42,16 @@ This tool answers three questions in one pass:
 - **Auto-update with rollback** — snapshot, upgrade, GPU smoke test, `pip check`,
   and automatic restore on failure.
 
+## How it works
+
+![Three-layer automation architecture](docs/architecture.svg)
+
+`check_stack.py` produces a JSON report with the current/latest versions and the
+torch Python ceiling. The scheduled wrapper (`run_daily.ps1`) decides whether to
+notify and, with `-AutoUpdate`, calls `auto_update.py` to snapshot, upgrade, run a
+GPU smoke test, and roll back on failure.
+
+
 ## Requirements
 
 - Windows 10/11
