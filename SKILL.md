@@ -4,7 +4,7 @@ description: "檢查本機 AI 堆疊是否有新版：Python 預設版本、PyTo
 license: MIT
 metadata:
   author: local
-  version: "2.0.1"
+  version: "2.0.2"
   root: "C:\\Users\\princ"
 ---
 
@@ -311,6 +311,7 @@ winget upgrade Ollama.Ollama
 
 | 版本 | 日期 | 變更 |
 |---|---|---|
+| 2.0.2 | 2026-10-21 | 新增 GitHub Actions CI、README 徽章、tag 觸發 Release 自動化 |
 | 2.0.1 | 2026-10-21 | 腳本可攜化：`$PSScriptRoot`、`-Python`／`-LogDir` 參數，移除寫死路徑 |
 | 2.0.0 | 2026-10-21 | 方案 C：自動升級 + 快照 + 煙霧測試 + 失敗回滾（`auto_update.py`）；排程改為 `-AutoUpdate` |
 | 1.2.0 | 2026-10-21 | 有更新時發 Windows toast（`notify.ps1`、AppID `AIStack.UpdateCheck`） |

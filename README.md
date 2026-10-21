@@ -1,5 +1,11 @@
 # ai-stack-update-check
 
+[![CI](https://github.com/kalpakjian/ai-stack-update-check/actions/workflows/ci.yml/badge.svg)](https://github.com/kalpakjian/ai-stack-update-check/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/kalpakjian/ai-stack-update-check?display_name=tag)](https://github.com/kalpakjian/ai-stack-update-check/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D4)]()
+
 Check, notify, and **safely auto-update** a local AI stack on Windows:
 Python, PyTorch (CUDA wheels), torchvision, torchaudio, torchcodec,
 transformers, datasets, accelerate, numpy, pandas, and Ollama.
