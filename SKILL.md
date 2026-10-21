@@ -69,7 +69,7 @@ python C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\check_stack.p
 | 工作名稱 | `AI Stack Update Check` |
 | 觸發時間 | **每天 23:00**（當地時間） |
 | 執行內容 | `scripts/run_daily.ps1 -AutoUpdate`（檢查 → 自動升級 → 失敗回滾；結果 toast）；檢查固定加 `--runtime`（含 cuDNN） |
-| 日誌 | `C:\Users\princ\ml-demos\logs\stack-check-YYYY-MM-DD.log` |
+| 日誌 | `C:\Users\princ\ml-demos\logs\stack-check-YYYY-MM-DD.log`、`cudnn-sync-YYYY-MM-DD.log`（補檔工作） |
 | 最新摘要 | `C:\Users\princ\ml-demos\logs\stack-check-latest.log` |
 | 狀態檔 | `...\stack-check-status.txt`（`OK` / `AUTO_UPDATED: ...` / `ROLLED_BACK: ...` / `ROLLBACK_FAILED` / `CUDNN_PROBLEM: ...`） |
 | 保留期限 | 90 天（自動刪除舊日誌） |
@@ -169,6 +169,7 @@ powershell -File C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\run
 | `logs\auto-update-summary.json` | 升級前後版本、changed、smoke、rollback、mismatches（`-Bench` 另有 `bench_before`／`bench_after`／`bench_delta`） |
 | `logs\stack-check-status.txt` | `OK` / `AUTO_UPDATED: ...` / `ROLLED_BACK: ...` / `ROLLBACK_FAILED` / `CUDNN_PROBLEM: ...` |
 | `logs\stack-check-YYYY-MM-DD.log` | 完整過程（含 pip 輸出、`TOAST:` 行） |
+| `logs\cudnn-sync-YYYY-MM-DD.log` | 提權補檔工作（`sync_cudnn.ps1`）的日誌；`-LogDir` 需與這裡一致 |
 
 ### 回滾細節
 
@@ -324,8 +325,9 @@ winget upgrade Ollama.Ollama
 （自己啟動自己的工作不會跳 UAC），補檔就能自動化。
 
 ```powershell
-# ① 一次性（系統管理員）：註冊提權工作
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\register_cudnn_sync_task.ps1
+# ① 一次性（系統管理員）：註冊提權工作（-LogDir 建議與每日排程一致）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\register_cudnn_sync_task.ps1 `
+  -LogDir "C:\Users\princ\ml-demos\logs"
 
 # ② 之後任何時候（不需要管理員）
 python scripts\check_stack.py --fix-cudnn     # 偵測到缺檔 → 觸發工作 → 等它跑完 → 重新掃描
@@ -333,7 +335,7 @@ powershell -File scripts\run_daily.ps1        # 偵測到工作存在就自動�
 
 # ③ 手動測試／看日誌／移除
 schtasks /run /tn "AI Stack cuDNN Sync"
-Get-Content "$env:USERPROFILE\ai-stack-logs\cudnn-sync-YYYY-MM-DD.log"
+Get-Content "C:\Users\princ\ml-demos\logs\cudnn-sync-YYYY-MM-DD.log"   # 與每日排程同目錄
 powershell -File scripts\register_cudnn_sync_task.ps1 -Unregister
 ```
 
@@ -428,7 +430,7 @@ python scripts\bench_gpu.py --quick --json-out bench.json    # 快速（升級�
 | `cuDNN: check failed` | `--runtime` 連 torch 都匯入失敗 | 先修 torch（看同一行的錯誤訊息） |
 | `cuDNN auto-fix: scheduled task ... is not registered` | 還沒做一次性註冊 | 以管理員跑 `scripts\register_cudnn_sync_task.ps1` |
 | 補檔後仍有 `access denied` | 工作不是最高權限執行 | 重新註冊（`-Force` 已內建）並確認 `RunLevel=Highest` |
-| 工作跑了但檔案還是缺 | 來源路徑或版本層不對 | 看 `%USERPROFILE%\ai-stack-logs\cudnn-sync-*.log` 的 `SOURCE MISSING`／`FAIL` |
+| 工作跑了但檔案還是缺 | 來源路徑或版本層不對 | 看 `<LogDir>\cudnn-sync-*.log`（本機：`C:\Users\princ\ml-demos\logs`）的 `SOURCE MISSING`／`FAIL` |
 
 ## 相關檔案
 

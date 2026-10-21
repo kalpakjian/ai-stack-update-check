@@ -249,16 +249,17 @@ the unelevated job can start on demand (`schtasks /run` on your own task does no
 raise a UAC prompt):
 
 ```powershell
-# (1) once, as administrator
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\register_cudnn_sync_task.ps1
+# (1) once, as administrator (-LogDir should match your daily job's log directory)
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\register_cudnn_sync_task.ps1 `
+  -LogDir "C:\Users\princ\ml-demos\logs"
 
 # (2) from then on, no elevation needed
 python scripts\check_stack.py --fix-cudnn     # detect -> trigger the task -> wait -> re-scan
 powershell -File scripts\run_daily.ps1        # auto-adds --fix-cudnn when the task exists
 
-# (3) manual test / log / removal
+# (3) manual test / log / removal (default log dir: %USERPROFILE%\ai-stack-logs)
 schtasks /run /tn "AI Stack cuDNN Sync"
-Get-Content "$env:USERPROFILE\ai-stack-logs\cudnn-sync-YYYY-MM-DD.log"
+Get-Content "C:\Users\princ\ml-demos\logs\cudnn-sync-YYYY-MM-DD.log"
 powershell -File scripts\register_cudnn_sync_task.ps1 -Unregister
 ```
 
