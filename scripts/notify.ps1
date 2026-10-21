@@ -1,4 +1,4 @@
-# notify.ps1 — 發送 Windows 11 toast 通知（不需外部模組）
+﻿# notify.ps1 — 發送 Windows 11 toast 通知（不需外部模組）
 # 用法： powershell -File notify.ps1 -Title "..." -Body "line1`nline2"
 param(
     [Parameter(Mandatory = $true)][string]$Title,

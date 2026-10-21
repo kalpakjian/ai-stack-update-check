@@ -7,8 +7,8 @@
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D4)]()
 
 Check, notify, and **safely auto-update** a local AI stack on Windows:
-Python, PyTorch (CUDA wheels), torchvision, torchaudio, torchcodec,
-transformers, datasets, accelerate, numpy, pandas, and Ollama.
+Python, PyTorch (CUDA wheels), **cuDNN readiness**, torchvision, torchaudio,
+torchcodec, transformers, datasets, accelerate, numpy, pandas, and Ollama.
 
 The core rule: **a newer Python is not always a safe Python.** PyTorch ships
 wheels only up to a specific `cpXY` tag, so this tool derives compatibility from
@@ -34,6 +34,19 @@ This tool answers three questions in one pass:
 
 - **One-shot report** — current vs latest for the whole stack, with a clear status.
 - **Wheel-aware** — checks actual `win_amd64` wheels on the PyTorch CUDA index.
+- **cuDNN aware** — by default it scans `torch\lib\cudnn*.dll` (no torch import);
+  with `--runtime` it verifies `torch.backends.cudnn.is_available()` /
+  `version()`, reports the cudnn DLL torch actually loaded, and runs a real
+  cuDNN convolution. cuDNN ships inside the torch wheel, so it is never
+  suggested as a pip upgrade.
+- **cuDNN copy check** — compares `CUDNN\v*` against `CUDA\v*` so a forgotten
+  `include` (or a forgotten CUDA-version folder in the installer path) shows up
+  as a warning instead of a silent gap.
+- **GPU benchmark** — `bench_gpu.py` measures cuBLAS matmul (TF32 on/off, fp16,
+  bf16), cuDNN convolutions (fp32/TF32/fp16, `channels_last`), the
+  `cudnn.benchmark` autotune, flash attention, and two cached HF baselines.
+  `check_stack.py --bench` folds it into the report; `auto_update.py --bench`
+  compares before/after an upgrade.
 - **Python guard** — reports "newer exists (torch max 3.14)" instead of telling you
   to break your GPU environment.
 - **JSON output** — `--json` / `--json-out` for scripts and CI.
@@ -46,10 +59,11 @@ This tool answers three questions in one pass:
 
 ![Three-layer automation architecture](docs/architecture.svg)
 
-`check_stack.py` produces a JSON report with the current/latest versions and the
-torch Python ceiling. The scheduled wrapper (`run_daily.ps1`) decides whether to
-notify and, with `-AutoUpdate`, calls `auto_update.py` to snapshot, upgrade, run a
-GPU smoke test, and roll back on failure.
+`check_stack.py` produces a JSON report with the current/latest versions, the
+torch Python ceiling, and the cuDNN status. The scheduled wrapper
+(`run_daily.ps1`) decides whether to notify and, with `-AutoUpdate`, calls
+`auto_update.py` to snapshot, upgrade, run a GPU + cuDNN smoke test, and roll
+back on failure.
 
 
 ## Requirements
@@ -83,6 +97,9 @@ powershell -File scripts\run_daily.ps1 -AutoUpdate
 
 # Test the toast without waiting for an update
 powershell -File scripts\run_daily.ps1 -ForceNotify
+
+# Check + upgrade + smoke test + rollback, with a before/after GPU benchmark
+powershell -File scripts\run_daily.ps1 -AutoUpdate -Bench
 ```
 
 ### Options
@@ -91,7 +108,9 @@ powershell -File scripts\run_daily.ps1 -ForceNotify
 |---|---|
 | `--json` | Print the full report as JSON |
 | `--json-out PATH` | Also write the JSON report to a file |
-| `--runtime` | Import torch and verify CUDA availability (slower) |
+| `--runtime` | Import torch and verify CUDA **and cuDNN** availability (slower) |
+| `--bench` | Also run the GPU benchmark (`scripts/bench_gpu.py`) |
+| `--bench-quick` | With `--bench`: fast subset (no HF baselines) |
 | `--no-network` | Skip online checks; only list installed versions |
 
 Exit codes: `0` = no actionable updates (a Python upgrade blocked by torch still
@@ -116,15 +135,23 @@ datasets      5.1.0               5.1.0             up to date
 accelerate    1.15.0              1.15.0            up to date
 numpy         2.5.4               2.5.4             up to date
 pandas        3.0.6               3.0.6             up to date
+cuDNN         9.24.0              -                 ok
 Ollama        0.40.6              0.40.6            up to date
 --------------------------------------------------------------------------------------
 GPU: NVIDIA GeForce RTX 4090 | driver 617.42 | CUDA 13.4
+Runtime: 2.14.1+cu132 | CUDA available: True | NVIDIA GeForce RTX 4090 | cuDNN 9.24.0 (cudnn64_9.dll)
 Ollama models: 21
+
+Warnings:
+  ! cuDNN v9.22 -> CUDA v13.2: 8 file(s) missing (bin 10/10, include 0/8, lib 29/29) - the cuDNN
+    files are not fully copied into the CUDA toolkit: include\cudnn.h, include\cudnn_ops.h, ...
 
 Notes:
   - Python 3.15.0 is out, but the newest torch wheel only supports up to 3.14 (cp314);
     upgrading now would break PyTorch.
   - CUDA build: cu132 (newest available for Windows: cu132)
+  - cuDNN 9.24.0 available (ships inside the torch wheel; loaded from ...\torch\lib\cudnn64_9.dll).
+  - cuDNN v9.26 -> CUDA v13.4: bin 10/10, include 9/9, lib 29/29 (complete).
 
 Suggested commands:
   # Python 3.15.0: do not upgrade yet; wait for a torch cp315 wheel
@@ -150,7 +177,7 @@ Artifacts (default log directory: `%USERPROFILE%\ai-stack-logs`):
 |---|---|
 | `stack-check-YYYY-MM-DD.log` | full run log |
 | `stack-check-latest.log` | last 60 lines |
-| `stack-check-status.txt` | `OK` / `AUTO_UPDATED: ...` / `ROLLED_BACK: ...` |
+| `stack-check-status.txt` | `OK` / `AUTO_UPDATED: ...` / `ROLLED_BACK: ...` / `ROLLBACK_FAILED` / `CUDNN_PROBLEM: ...` |
 | `stack-report.json` | checker report |
 | `auto-update-summary.json` | before/after, changed, smoke, rollback |
 
@@ -167,6 +194,48 @@ at the scheduled time, `StartWhenAvailable` runs it on the next wake.
 | Python | CPython | never automatic |
 | Ollama | ollama | never automatic (service restart) |
 | CUDA-only | same torch version, newer CUDA build | never automatic (often a ~2 GB download) |
+| cuDNN | bundled with the torch wheel | never a separate upgrade — it only changes when the torch wheel changes |
+
+## cuDNN (readiness, not updates)
+
+cuDNN is NVIDIA's deep-learning acceleration library (convolutions, attention,
+matmul). On Windows PyTorch does not install it as a separate pip package — it
+**ships inside the torch wheel** (`torch\lib\cudnn*_9.dll`, ~540 MB here), which
+is why this tool verifies it but never lists it as an update.
+
+| Status | Meaning |
+|---|---|
+| `ok` | `torch.backends.cudnn.is_available()` is True and `version()` returns a number |
+| `present (not verified)` | cuDNN libraries found next to torch, but this run had no `--runtime` |
+| `not available` | torch is installed and CUDA works, but cuDNN is unusable → reinstall the matching torch wheel |
+| `not found` | no cuDNN library found next to torch |
+| `not installed` | torch is not installed in this interpreter |
+| `check failed` | the `--runtime` probe could not import torch |
+
+> **Gotcha — do not ask the DLL directly.** Loading `cudnn64_9.dll` yourself and
+> calling `cudnnGetVersion()` can return the *wrong* version. Measured on this
+> machine: a bare `ctypes.WinDLL` of torch's 9.24.0 copy pulled
+> `cudnn_graph64_9.dll` from the CUDA 13.4 toolkit (9.26.0) and reported
+> **9.26.0**, while torch itself reports **9.24.0** (both `torch.backends.cudnn
+> .version()` and `cudnnGetVersion()` inside the torch process agree). torch
+> preloads `torch\lib\*.dll` with `LoadLibraryExW(..., 0x1100)` so its own copy
+> always wins. Trust `--runtime`, not an ad-hoc DLL load.
+
+### Is cuDNN fully copied into the CUDA toolkit?
+
+The cuDNN zip/installer only *unpacks* the files — `bin`, `include` and `lib\x64`
+still have to be copied into `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\vXX.X\`.
+The checker compares `CUDNN\v*` against `CUDA\v*` by file name and size (no
+hashing of the GB-sized static libs):
+
+- complete → one `Notes` line: `cuDNN v9.26 -> CUDA v13.4: bin 10/10, include 9/9, lib 29/29 (complete).`
+- missing → a `Warnings` line with `bin 10/10, include 0/8, ...`, the missing file
+  names, and a ready-to-run `Copy-Item` command (needs an elevated shell).
+
+`bin\` and `bin\x64\` both count as "copied" (both are on `PATH`). The installer
+layout has an extra CUDA-version folder (`bin\13.2\x64`, `include\13.2`); omitting
+it matches **zero** files and copies nothing — silently. That is how `include`
+ends up missing most of the time.
 
 ## How rollback works
 
@@ -174,7 +243,8 @@ at the scheduled time, `StartWhenAvailable` runs it on the next wake.
 
 1. `pip freeze` snapshot before touching anything.
 2. Upgrade via `pip install --upgrade ...`.
-3. Smoke test: import every key package and run a GPU matmul.
+3. Smoke test: import every key package, run a GPU matmul and a cuDNN
+   convolution — it fails if CUDA is available but cuDNN is not.
 4. `pip check` for broken requirements.
 5. On any failure: reinstall only the packages that changed, pinned to the
    snapshot version (`--force-reinstall --no-deps`), using the **original CUDA
@@ -183,6 +253,48 @@ at the scheduled time, `StartWhenAvailable` runs it on the next wake.
    marks the rollback as failed.
 
 Exit codes for `auto_update.py`: `0` success/no-op, `1` rolled back, `2` rollback failed.
+
+With `--bench`, the GPU benchmark runs before the upgrade and again after a
+successful one; `bench_before`, `bench_after` and `bench_delta` (per-metric
+percent change, plus whether higher or lower is better) land in
+`auto-update-summary.json`.
+
+## GPU benchmark
+
+`scripts/bench_gpu.py` measures the paths that matter for a local AI stack. Output
+is English-only (Windows consoles mangle Chinese when redirected); `--json-out`
+writes the same numbers as JSON.
+
+| Block | What it measures |
+|---|---|
+| `[cuBLAS]` | matmul 4096³ — fp32 (TF32 off/on), fp16, bf16 → ms and TFLOPS |
+| `[cuDNN]` | conv2d — ResNet stem (224) and mid (56) in fp32/TF32/fp16, contiguous vs `channels_last` |
+| `[cuDNN] benchmark` | `torch.backends.cudnn.benchmark` on/off, including autotune time |
+| `[attention]` | SDPA fp16 (flash attention) latency and TFLOPS |
+| `[HF baselines]` | cached models, offline: DistilBERT SST-2 texts/s, ViT-base 224 ms/img |
+
+Measured baseline (2026-10-22, RTX 4090 / torch 2.14.1+cu132 / cuDNN 9.24.0):
+
+| Metric | Value | Note |
+|---|---|---|
+| matmul fp32 (TF32 off → on) | 59.8 → **82.5 TFLOPS** | TF32 +38% |
+| matmul fp16 / bf16 | **185.4** / 159.5 TFLOPS | |
+| conv mid 56 fp32 → fp16 → fp16+`channels_last` | 1.771 → 1.020 → **0.790 ms** | 2.24×; VRAM 656 → 107 MB |
+| `cudnn.benchmark` on/off | 1.836 → 1.836 ms (1.00×) | no gain for a fixed shape; autotune costs 0.03 s |
+| SDPA fp16 (flash) | 0.074 ms / 116.3 TFLOPS | |
+| DistilBERT SST-2 (batch 64) | **3,130 texts/s** | blog baseline 3,243 texts/s (within 4%) |
+| ViT-base 224 (batch 1 / 32) | 5.51 / 1.00 ms/img | blog baseline 5.7 ms/img |
+
+```powershell
+python scripts\bench_gpu.py                                   # full (~1 min)
+python scripts\bench_gpu.py --skip-hf                         # micro only
+python scripts\bench_gpu.py --only-hf --db-batch 64 --vit-batch 1
+python scripts\bench_gpu.py --quick --json-out bench.json     # fast before/after runs
+```
+
+Three knobs it quantifies: `torch.backends.cuda.matmul.allow_tf32` (fp32 matmul
++38%), AMP + `channels_last` (conv up to 2.24×), and `cudnn.benchmark` (only worth
+it when input shapes vary).
 
 ## Data sources
 
@@ -193,6 +305,10 @@ Exit codes for `auto_update.py`: `0` success/no-op, `1` rolled back, `2` rollbac
 | Latest packages | `https://pypi.org/pypi/<pkg>/json` |
 | Max Python for torch | `cp3XY` tags in torch wheel filenames |
 | Newest usable CUDA | `https://download.pytorch.org/whl/` + real wheel `HEAD` |
+| cuDNN files (default) | `torch\lib\cudnn*.dll` scan (Linux: `nvidia/cudnn/lib`) — no torch import |
+| cuDNN availability / version (`--runtime`) | `torch.backends.cudnn.is_available()` / `version()` + `GetModuleHandleW` for the loaded path |
+| cuDNN copied into CUDA | `CUDNN\v*` vs `CUDA\v*` file names + sizes (`bin`, `include`, `lib\x64`) |
+| GPU benchmark | `scripts/bench_gpu.py` — CUDA events, cached HF models run offline |
 | Ollama local / latest | `http://localhost:11434/api/version`, GitHub Releases |
 | GPU / driver | `nvidia-smi` (`CUDA UMD Version` or `CUDA Version`) |
 
@@ -203,6 +319,7 @@ Exit codes for `auto_update.py`: `0` success/no-op, `1` rolled back, `2` rollbac
 | OS | Windows 11 Pro (26220) |
 | Python | 3.14.8 |
 | torch / torchvision | 2.14.1+cu132 / 0.29.1+cu132 |
+| cuDNN | 9.24.0 (bundled in torch 2.14.1+cu132, `torch\lib\cudnn64_9.dll`) |
 | torchaudio / torchcodec | 2.11.0 / 0.17.0 |
 | transformers / datasets / accelerate | 5.20.2 / 5.1.0 / 1.15.0 |
 | GPU | NVIDIA GeForce RTX 4090, driver 617.42 |
@@ -228,6 +345,11 @@ installing it.
   tensors, only file decoding is CPU-bound.
 - **`torch-cuda` is not a package.** It is a synthetic status meaning "same torch
   version, newer CUDA build".
+- **cuDNN is checked on every scheduled run.** `run_daily.ps1` always passes
+  `--runtime`, logs `CUDNN: status=... installed=... libs=...`, and writes
+  `CUDNN_PROBLEM: <status>` (plus a toast) when cuDNN is unusable. System-level
+  cuDNN installs (`C:\Program Files\NVIDIA\CUDNN\...`, CUDA toolkit `bin\x64`)
+  are ignored by PyTorch — only `torch\lib` matters.
 - **Python is never auto-upgraded** — it cannot be done with pip, and torch may
   not support the new interpreter yet.
 - **PowerShell + git:** `git push` writes progress to stderr; PowerShell may show
@@ -239,12 +361,18 @@ MIT — see [LICENSE](LICENSE).
 
 ## 中文簡介
 
-這個工具會檢查本機 AI 堆疊（Python、PyTorch/CUDA、transformers、Ollama）是否有
-更新，並且**只在你真的能安裝時**才建議升級：它會讀取 PyTorch wheel 的 `cpXY`
-標籤，判斷最新 Python 是否受支援；也會對 CUDA 索引發出真實的 wheel 請求，避免
+這個工具會檢查本機 AI 堆疊（Python、PyTorch/CUDA、cuDNN、transformers、Ollama）
+是否有更新，並且**只在你真的能安裝時**才建議升級：它會讀取 PyTorch wheel 的
+`cpXY` 標籤，判斷最新 Python 是否受支援；也會對 CUDA 索引發出真實的 wheel 請求，避免
 把只有 Linux 版本的 `cu129`/`cu134` 誤認為可用。
+
+cuDNN 隨 torch wheel 一起安裝（`torch\lib\cudnn*.dll`），不能單獨 pip 升級，所以
+工具只檢查「裝好了沒、版本多少」：預設掃檔案，加 `--runtime` 才用
+`torch.backends.cudnn.is_available()`／`version()` 實測，並回報實際載入的 DLL 與
+一次真的走 cuDNN 的 GPU 卷積。
 
 可選的自動更新模式會在升級前快照、升級後跑 GPU 煙霧測試與 `pip check`，失敗時
 自動回滾到原本版本。搭配 Windows 工作排程器可每天固定時間執行，並用 toast 通知
-結果。
+結果；加 `-Bench` 會在升級前後各跑一次 GPU 效能基準（cuBLAS／cuDNN／HF 基線），
+把 `bench_delta` 寫進日誌，用來判斷「新版有沒有變慢」。
 

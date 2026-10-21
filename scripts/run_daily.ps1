@@ -1,8 +1,9 @@
-# run_daily.ps1 — 每日排程：檢查版本；可選自動升級（失敗自動回滾）；有變更/更新時 toast。
+﻿# run_daily.ps1 — 每日排程：檢查版本；可選自動升級（失敗自動回滾）；有變更/更新時 toast。
 param(
     [string]$Python = "",
     [string]$LogDir = (Join-Path $env:USERPROFILE "ai-stack-logs"),
     [switch]$AutoUpdate,
+    [switch]$Bench,
     [switch]$ForceNotify,
     [switch]$DryRun
 )
@@ -35,10 +36,12 @@ function Write-Log([string]$text) {
 Remove-Item $reportPath, $autoSummaryPath -Force -ErrorAction SilentlyContinue
 
 Write-Log ("`n===== {0:yyyy-MM-dd HH:mm:ss} =====" -f (Get-Date))
-Write-Log ("Mode: AutoUpdate={0} DryRun={1}" -f $AutoUpdate, $DryRun)
+Write-Log ("Mode: AutoUpdate={0} DryRun={1} Bench={2}" -f $AutoUpdate, $DryRun, $Bench)
 
-# 1) 版本檢查（一律先做）
-$output = & $Python -u $Script --json-out $reportPath 2>&1
+# 1) 版本檢查（一律先做；--runtime 會匯入 torch 實測 CUDA 與 cuDNN）
+$checkArgs = @("-u", $Script, "--json-out", $reportPath, "--runtime")
+if ($Bench -and -not $AutoUpdate) { $checkArgs += "--bench" }
+$output = & $Python @checkArgs 2>&1
 $code = $LASTEXITCODE
 $output | ForEach-Object { Write-Log ([string]$_) }
 
@@ -46,6 +49,22 @@ $updates = @()
 foreach ($line in $output) {
     if ([string]$line -match '^(\S+)\s+.*\supdate available') {
         $updates += $Matches[1]
+    }
+}
+
+# 1b) cuDNN 狀態（報告的 cudnn 區塊）；不可用時要在狀態檔與通知看得到
+$cudnnProblem = $null
+if (Test-Path $reportPath) {
+    try {
+        $rpt = Get-Content $reportPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $cudnnStatus = [string]$rpt.cudnn.status
+        Write-Log ("CUDNN: status={0} installed={1} libs={2} dll={3}" -f `
+            $cudnnStatus, $rpt.cudnn.installed, $rpt.cudnn.libs, $rpt.cudnn.dll)
+        if ($cudnnStatus -in @("not available", "not found", "check failed")) {
+            $cudnnProblem = "CUDNN_PROBLEM: $cudnnStatus"
+        }
+    } catch {
+        Write-Log ("CUDNN: report parse failed: " + $_.Exception.Message)
     }
 }
 
@@ -58,6 +77,7 @@ if ($AutoUpdate) {
     Write-Log "`n===== AUTO UPDATE ====="
     $autoArgs = @("-u", $AutoScript, "--report", $reportPath, "--json-out", $autoSummaryPath)
     if ($DryRun) { $autoArgs += "--dry-run" }
+    if ($Bench) { $autoArgs += "--bench" }
     $autoOut = & $Python @autoArgs 2>&1
     $autoCode = $LASTEXITCODE
     $autoOut | ForEach-Object { Write-Log ([string]$_) }
@@ -97,6 +117,15 @@ if ($AutoUpdate) {
         $statusText = "UPDATES_AVAILABLE: " + ($updates -join ", ")
         $toastTitle = "AI Stack: $($updates.Count) update(s) available"
         $toastBody = "Updates: " + ($updates -join ", ") + "`nRun with -AutoUpdate to install"
+    }
+}
+
+# 2b) cuDNN 異常優先於 OK／UPDATES_AVAILABLE（回滾類訊息優先權最高，不覆蓋）
+if ($cudnnProblem -and $statusText -notlike "ROLLBACK_FAILED*" -and $statusText -notlike "ROLLED_BACK*") {
+    $statusText = $cudnnProblem
+    if (-not $toastTitle) {
+        $toastTitle = "AI Stack: cuDNN not usable"
+        $toastBody = "torch.backends.cudnn is not usable.`nSee stack-check-latest.log"
     }
 }
 

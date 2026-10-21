@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 
@@ -24,18 +26,37 @@ TORCH_PKGS = {"torch", "torchvision"}
 AUDIO_PKGS = {"torchaudio", "torchcodec"}
 NEVER_AUTO = {"ollama", "torch-cuda"}
 
-# 升級後的健康檢查：匯入所有關鍵套件 + 真的跑一次 GPU matmul
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BENCH_SCRIPT = os.path.join(SCRIPT_DIR, "bench_gpu.py")
+# 升級前後要比的關鍵指標：(顯示名, bench_gpu.py JSON 的路徑, 越高越好)
+BENCH_METRICS = (
+    ("matmul fp16 TFLOPS", ("matmul", "fp16", "tflops"), True),
+    ("conv fp16+CL ms", ("conv", "mid 56 fp16 CL", "ms"), False),
+    ("DistilBERT texts/s", ("hf", "distilbert", "texts_per_s"), True),
+    ("ViT ms/img", ("hf", "vit_base", "ms_per_image"), False),
+)
+
+# 升級後的健康檢查：匯入所有關鍵套件 + GPU matmul + 真的走 cuDNN 的卷積
+# （CUDA 可用但 cuDNN 不可用 → 退出碼 1 → 觸發回滾）
 SMOKE_CODE = (
     "import torch, numpy;"
     "print('torch', torch.__version__);"
     "print('cuda_available', torch.cuda.is_available());"
+    "print('cudnn_available', torch.backends.cudnn.is_available());"
+    "print('cudnn_version', torch.backends.cudnn.version());"
     "dev='cuda' if torch.cuda.is_available() else 'cpu';"
     "x=torch.randn(256,256,device=dev);"
     "print('matmul', tuple((x@x).shape));"
+    "import torch.nn as nn;"
+    "y=nn.Conv2d(3,4,3,padding=1).to(dev)(torch.randn(4,3,32,32,device=dev));"
+    "print('conv', tuple(y.shape), y.device);"
     "import transformers, datasets, accelerate;"
     "import torchvision, torchaudio, torchcodec;"
     "import pandas;"
     "print('imports_ok');"
+    "import sys;"
+    "sys.exit(0 if (not torch.cuda.is_available()"
+    " or torch.backends.cudnn.is_available()) else 1)"
 )
 
 
@@ -113,6 +134,50 @@ def pip_check():
     return run([PY, "-m", "pip", "check"], timeout=120)
 
 
+def bench(quick=False):
+    """跑 bench_gpu.py 拿 JSON；失敗回 {'error': ...}。"""
+    if not os.path.isfile(BENCH_SCRIPT):
+        return {"error": "bench_gpu.py not found next to auto_update.py"}
+    out_path = os.path.join(tempfile.gettempdir(), "ai-stack-bench-auto.json")
+    cmd = [PY, BENCH_SCRIPT, "--json-out", out_path]
+    if quick:
+        cmd.append("--quick")
+    res = run(cmd, timeout=1800)
+    if res["rc"] != 0:
+        return {"error": "benchmark exit %d: %s"
+                % (res["rc"], (res["err"] or "").strip()[-300:])}
+    try:
+        with open(out_path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": "cannot read benchmark output: %s" % exc}
+
+
+def bench_metrics(data):
+    """只留關鍵指標。"""
+    out = {}
+    for label, path, _ in BENCH_METRICS:
+        current = data
+        for key in path:
+            current = current.get(key) if isinstance(current, dict) else None
+        if isinstance(current, (int, float)):
+            out[label] = round(float(current), 3)
+    return out
+
+
+def bench_delta(before, after):
+    """升級前後差異（含「越高越好／越低越好」判定）。"""
+    rows = {}
+    for label, _, higher_better in BENCH_METRICS:
+        old, new = before.get(label), after.get(label)
+        if not old or not new:
+            continue
+        pct = (new - old) / old * 100.0
+        rows[label] = {"before": old, "after": new, "pct": round(pct, 1),
+                       "better": (pct >= 0) if higher_better else (pct <= 0)}
+    return rows
+
+
 def rollback(changed, before):
     """把本次變動的套件還原到快照版本；新裝的套件則卸載。"""
     plain_specs, torch_specs, new_pkgs = [], [], []
@@ -155,6 +220,10 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="print commands only")
     parser.add_argument("--simulate-failure", action="store_true",
                         help="force the post-upgrade check to fail (tests rollback)")
+    parser.add_argument("--bench", action="store_true",
+                        help="run the GPU benchmark before and after the upgrade")
+    parser.add_argument("--bench-quick", action="store_true",
+                        help="with --bench: fast subset (no HF baselines)")
     args = parser.parse_args(argv)
 
     with open(args.report, "r", encoding="utf-8") as handle:
@@ -188,6 +257,10 @@ def main(argv=None):
         summary["result"] = "dry-run"
         write_json(args.json_out, summary)
         return 0
+
+    if args.bench:
+        print("Benchmark (before)...")
+        summary["bench_before"] = bench(args.bench_quick)
 
     before = freeze()
     summary["before"] = before
@@ -229,6 +302,19 @@ def main(argv=None):
             ok = False
 
     if ok:
+        if args.bench:
+            print("Benchmark (after)...")
+            after_bench = bench(args.bench_quick)
+            summary["bench_after"] = after_bench
+            deltas = bench_delta(bench_metrics(summary.get("bench_before") or {}),
+                                 bench_metrics(after_bench))
+            summary["bench_delta"] = deltas
+            if deltas:
+                print("Bench: " + ", ".join(
+                    "%s %s->%s (%+.1f%%)" % (k, v["before"], v["after"], v["pct"])
+                    for k, v in deltas.items()))
+            elif after_bench.get("error"):
+                print("Bench: failed - %s" % after_bench["error"])
         summary["result"] = "success" if changed else "no-op"
         detail = ", ".join("%s %s->%s" % (k, v["from"], v["to"])
                            for k, v in summary["upgraded"].items())

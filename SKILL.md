@@ -1,10 +1,10 @@
 ---
 name: ai-stack-update-check
-description: "檢查本機 AI 堆疊是否有新版：Python 預設版本、PyTorch/CUDA wheel、torchvision、torchaudio、torchcodec、transformers、datasets、accelerate、numpy、pandas、Ollama 與 GPU 驅動；可用 --runtime 實測 CUDA。WHEN: 檢查更新, 睇下有冇新版, 版本檢查, Python 版本, 最新版本, PyTorch 有冇更新, CUDA wheel 版本, torch 版本, transformers 版本, Ollama 更新, 套件過期, outdated, update check, version check, upgrade check, 依家裝咗咩版本, 個 stack 更唔更新. DO NOT USE FOR: 直接執行升級安裝（除非用戶明確要求，照輸出指令做）、一般 pip list／pip freeze 查詢、非 AI 套件的版本管理、切換 Python 直譯器（用 py launcher 或 uv）。"
+description: "檢查本機 AI 堆疊是否有新版：Python 預設版本、PyTorch/CUDA wheel、cuDNN（裝好未／版本／有沒有完整複製進 CUDA 目錄）、torchvision、torchaudio、torchcodec、transformers、datasets、accelerate、numpy、pandas、Ollama 與 GPU 驅動；可用 --runtime 實測 CUDA 與 cuDNN、--bench 跑 GPU 效能基準。WHEN: 檢查更新, 睇下有冇新版, 版本檢查, Python 版本, 最新版本, PyTorch 有冇更新, CUDA wheel 版本, cuDNN 版本, cuDNN 有冇裝好, cudnn 裝好未, cuDNN 複製, cuDNN 抄過去未, include 漏咗, GPU 效能, 跑分, benchmark, TFLOPS, cuDNN 優化, 有冇變慢, torch 版本, transformers 版本, Ollama 更新, 套件過期, outdated, update check, version check, upgrade check, 依家裝咗咩版本, 個 stack 更唔更新. DO NOT USE FOR: 直接執行升級安裝（除非用戶明確要求，照輸出指令做）、一般 pip list／pip freeze 查詢、非 AI 套件的版本管理、切換 Python 直譯器（用 py launcher 或 uv）。"
 license: MIT
 metadata:
   author: local
-  version: "2.0.2"
+  version: "2.3.0"
   root: "C:\\Users\\princ"
 ---
 
@@ -21,6 +21,9 @@ metadata:
 | 「檢查下有冇更新」「個 stack 係咪最新」 | 跑預設模式（表格） |
 | 「Python 係咩版本？有冇新過？」 | 看 `Python` 那一行＋Notes |
 | 「PyTorch / CUDA 版本啱唔啱？」 | 看 `torch` 行＋`CUDA build` note |
+| 「cuDNN 有冇裝好？係咩版本？」 | 看 `cuDNN` 行（`--runtime` 才有版本）＋`Runtime` 行 |
+| 「cuDNN 抄進 CUDA 目錄未？include 有冇漏？」 | 看 `Warnings`／`Notes` 的 `cuDNN vX -> CUDA vY` 行（預設模式就有） |
+| 「GPU 效能點？cuDNN 有冇發揮？升級後有冇變慢？」 | 跑 `bench_gpu.py`（或 `check_stack.py --bench`、`auto_update.py --bench`） |
 | 「Ollama 要唔要更新？」 | 看 `Ollama` 行 |
 | 想把結果餵給其他程式 | `--json` |
 | 想確認 CUDA 真的能用 | `--runtime`（會匯入 torch，較慢） |
@@ -38,11 +41,17 @@ python C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\check_stack.p
 # JSON（給腳本／CI 用）
 python C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\check_stack.py --json
 
-# 額外驗證 CUDA（會 import torch，約多 3-5 秒）
+# 額外驗證 CUDA 與 cuDNN（會 import torch，約多 3-5 秒）
 python C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\check_stack.py --runtime
 
 # 離線：只列已安裝版本
 python C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\check_stack.py --no-network
+
+# 另跑 GPU 效能基準（會操 GPU，約 1 分鐘；--bench-quick 約 10 秒、不含模型）
+python C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\check_stack.py --bench
+
+# 單獨跑基準（含 TF32／fp16／channels_last／cudnn.benchmark 對照）
+python C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\bench_gpu.py
 ```
 
 > ⚠️ 用 `py -3.15 ...` 跑，檢查的就是 3.15 那個解譯器，不是你的預設環境。
@@ -56,10 +65,10 @@ python C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\check_stack.p
 |---|---|
 | 工作名稱 | `AI Stack Update Check` |
 | 觸發時間 | **每天 23:00**（當地時間） |
-| 執行內容 | `scripts/run_daily.ps1 -AutoUpdate`（檢查 → 自動升級 → 失敗回滾；結果 toast） |
+| 執行內容 | `scripts/run_daily.ps1 -AutoUpdate`（檢查 → 自動升級 → 失敗回滾；結果 toast）；檢查固定加 `--runtime`（含 cuDNN） |
 | 日誌 | `C:\Users\princ\ml-demos\logs\stack-check-YYYY-MM-DD.log` |
 | 最新摘要 | `C:\Users\princ\ml-demos\logs\stack-check-latest.log` |
-| 狀態檔 | `...\stack-check-status.txt`（`OK` / `AUTO_UPDATED: ...` / `ROLLED_BACK: ...` / `ROLLBACK_FAILED`） |
+| 狀態檔 | `...\stack-check-status.txt`（`OK` / `AUTO_UPDATED: ...` / `ROLLED_BACK: ...` / `ROLLBACK_FAILED` / `CUDNN_PROBLEM: ...`） |
 | 保留期限 | 90 天（自動刪除舊日誌） |
 
 ```powershell
@@ -114,8 +123,9 @@ Details: stack-check-latest.log
 ```
 pip freeze 快照
   → 依 check_stack.py 的報告升級
-  → 煙霧測試（import torch + GPU matmul + 所有關鍵套件）
+  → 煙霧測試（import torch + GPU matmul + cuDNN 卷積 + 所有關鍵套件）
   → pip check
+  → （`-Bench` 時）升級前後各跑一次 `bench_gpu.py`，把差異寫進日誌與 summary
   → 全部通過：保留升級、發成功通知
   → 任一失敗：把本次變動的套件還原到快照版本
        → 還原後再跑一次煙霧測試
@@ -153,8 +163,8 @@ powershell -File C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\run
 | 檔案 | 內容 |
 |---|---|
 | `logs\stack-report.json` | check_stack.py 的完整報告（升級決策來源） |
-| `logs\auto-update-summary.json` | 升級前後版本、changed、smoke、rollback、mismatches |
-| `logs\stack-check-status.txt` | `OK` / `AUTO_UPDATED: ...` / `ROLLED_BACK: ...` / `ROLLBACK_FAILED` |
+| `logs\auto-update-summary.json` | 升級前後版本、changed、smoke、rollback、mismatches（`-Bench` 另有 `bench_before`／`bench_after`／`bench_delta`） |
+| `logs\stack-check-status.txt` | `OK` / `AUTO_UPDATED: ...` / `ROLLED_BACK: ...` / `ROLLBACK_FAILED` / `CUDNN_PROBLEM: ...` |
 | `logs\stack-check-YYYY-MM-DD.log` | 完整過程（含 pip 輸出、`TOAST:` 行） |
 
 ### 回滾細節
@@ -173,6 +183,11 @@ powershell -File C:\Users\princ\.agents\skills\ai-stack-update-check\scripts\run
 | 升級：accelerate 1.14.0 → 1.15.0 | ✅ smoke pass、pip check pass |
 | 強制失敗後回滾 | ✅ 還原 1.14.0、post-rollback smoke pass、`result=rolled-back` |
 | 排程端到端 | ✅ `AUTO_UPDATED: accelerate`、toast 已送出 |
+| cuDNN 實測（2026-10-22） | ✅ `--runtime`：`cuDNN 9.24.0 (cudnn64_9.dll)`、`conv (8, 4, 32, 32) cuda:0`、`cudnn.status=ok` |
+| 煙霧測試含 cuDNN（2026-10-22） | ✅ `cudnn_available True`、`cudnn_version 92400`、`conv (4, 4, 32, 32) cuda:0`、rc 0 |
+| cuDNN 異常分支（2026-10-22） | ✅ 假報告測 7 種組合：`not available`／`not found`／`check failed` → `CUDNN_PROBLEM`；`ROLLED_BACK` 不被覆蓋 |
+| CUDA 目錄齊全度（2026-10-22） | ✅ 實測抓到 `cuDNN v9.22 -> CUDA v13.2` 的 `include 0/8`（8 個標頭全缺）→ 進 `Warnings`＋給複製指令；`v9.26 -> v13.4` 判為 `complete` |
+| 修復後複驗（2026-10-22） | ✅ 以管理員跑 `copy_cudnn_13.2.ps1`：`copied=8 skipped=39 errors=0`、逐檔 `mismatches=0`；重跑檢查 → `cuDNN v9.22 -> CUDA v13.2: bin 10/10, include 8/8, lib 29/29 (complete)`、`warnings` 0 |
 
 ### 取消自動升級
 
@@ -187,7 +202,7 @@ Set-ScheduledTask -TaskName 'AI Stack Update Check' `
 ```
 
 
-## 輸出範例（2026-10-21 實測）
+## 輸出範例（2026-10-21 實測，`--runtime` 模式）
 
 ```
 ======================================================================================
@@ -206,20 +221,31 @@ datasets      5.1.0               5.1.0             up to date
 accelerate    1.15.0              1.15.0            up to date
 numpy         2.5.4               2.5.4             up to date
 pandas        3.0.6               3.0.6             up to date
+cuDNN         9.24.0              -                 ok
 Ollama        0.40.6              0.40.6            up to date
 --------------------------------------------------------------------------------------
 GPU: NVIDIA GeForce RTX 4090 | driver 617.42 | CUDA 13.4
+Runtime: 2.14.1+cu132 | CUDA available: True | NVIDIA GeForce RTX 4090 | cuDNN 9.24.0 (cudnn64_9.dll)
 Ollama models: 21
+
+Warnings:
+  ! cuDNN v9.22 -> CUDA v13.2: 8 file(s) missing (bin 10/10, include 0/8, lib 29/29) - the cuDNN
+    files are not fully copied into the CUDA toolkit: include\cudnn.h, include\cudnn_ops.h, ...
 
 Notes:
   - Python 3.15.0 is out, but the newest torch wheel only supports up to 3.14 (cp314);
     upgrading now would break PyTorch.
   - CUDA build: cu132 (newest available for Windows: cu132)
+  - cuDNN 9.24.0 available (ships inside the torch wheel; loaded from ...\torch\lib\cudnn64_9.dll).
+  - cuDNN v9.26 -> CUDA v13.4: bin 10/10, include 9/9, lib 29/29 (complete).
 
 Suggested commands:
   # Python 3.15.0: do not upgrade yet; wait for a torch cp315 wheel
+  # cuDNN v9.22 -> CUDA v13.2: copy the missing files (elevated shell), e.g. Copy-Item
+    'C:\Program Files\NVIDIA\CUDNN\v9.22\include\13.2\*' '...\CUDA\v13.2\include\' -Force
 
 Result: no safe Python upgrade yet (blocked by torch wheel support).
+Note: 1 warning(s) above need attention.
 ```
 
 ## 判讀規則
@@ -232,8 +258,13 @@ Result: no safe Python upgrade yet (blocked by torch wheel support).
 | `not installed` | 該套件不在這個環境 | 需要才裝 |
 | `not checked` | 離線模式 | 需要時重跑（不加 `--no-network`） |
 | `check failed` | 查不到（網路／套件不存在） | 檢查網路或套件名稱 |
+| `ok`（cuDNN） | `torch.backends.cudnn.is_available()` 為 True 且有版本號 | 不用動 |
+| `present (not verified)`（cuDNN） | 檔案在 `torch\lib`，但這次沒跑 `--runtime` | 想看版本就加 `--runtime` |
+| `not available`（cuDNN） | torch 在、CUDA 可用，但 cuDNN 不可用 | **要處理**：照 Warnings 重裝對應 CUDA 索引的 torch wheel |
+| `not found`（cuDNN） | torch 在，但找不到 cuDNN 函式庫檔 | 先跑 `--runtime` 確認，再照 Warnings 處理 |
+| `not installed`（cuDNN） | 這個環境沒有 torch | 不用管（換環境再查） |
 
-### 兩個關鍵判斷邏輯
+### 三個關鍵判斷邏輯
 
 1. **Python 能不能升，看 torch 的 wheel tag**
    腳本會抓 PyPI 上 torch 最新版的 wheel 檔名，取 `cp3XX` 的最大值。
@@ -242,8 +273,29 @@ Result: no safe Python upgrade yet (blocked by torch wheel support).
 
 2. **CUDA 變體是否最新，看「真的有 Windows wheel」**
    `download.pytorch.org/whl/` 目錄裡有 `cu129`、`cu134`，但那些只有 Linux wheel。
-   腳本會對每個 `cuNNN` 實際 HEAD 一個 `torch-<latest>+cuNNN-cpXXX-cpXXX-win_amd64.whl`，
-   取第一個存在的，所以不會誤報「有新 CUDA」。
+   腳本會對每個 CUDA 索引（`cu126`、`cu128`、`cu132`、`cu134`…）實際 HEAD 一個對應的
+   wheel（例：`torch-2.14.1+cu132-cp314-cp314-win_amd64.whl`），取第一個存在的，
+   所以不會誤報「有新 CUDA」。
+
+3. **cuDNN 是「裝好未」，不是「有冇新版」**
+   cuDNN 隨 torch wheel 一起安裝（Windows 在 `torch\lib\cudnn*.dll`），
+   **不能獨立 pip 升級**，所以它永遠不會出現在 `updates`／`Suggested commands` 的升級清單。
+   預設模式只掃檔案（10 libs、542 MB）；加 `--runtime` 才用官方 API
+   `torch.backends.cudnn.is_available()` / `version()` 實測，並回報
+   **實際載入的 cudnn DLL 路徑**與一次真的走 cuDNN 的 GPU 卷積。
+   > ⚠️ 不要自己用 ctypes 載入 `cudnn64_9.dll` 去問 `cudnnGetVersion()`：實測會被 PATH 上
+   > 另一套系統版 cuDNN 的相依 DLL 混進來（本機回 9.26.0，torch 實際用 9.24.0）。
+   > torch 是用 `LoadLibraryExW(..., 0x1100)` 強制從自己的 `torch\lib` 載入。
+
+4. **cuDNN 有沒有「完整複製」進 CUDA 目錄**
+   cuDNN 的 zip 與 installer 都只是把檔案放到一個地方，還要**手動複製** `bin`＋`include`＋
+   `lib\x64` 三份到 `CUDA\vXX.X\`。腳本會比對 `CUDNN\v*` 與 `CUDA\v*`（檔名＋大小，
+   不讀 GB 級 static lib 的內容）：
+   - 齊全 → `Notes` 一行 `cuDNN v9.26 -> CUDA v13.4: bin 10/10, include 9/9, lib 29/29 (complete).`
+   - 缺檔 → `Warnings` 一行列出 `bin 10/10, include 0/8, ...` 與缺的檔名，並給複製指令。
+   > installer 的來源路徑多一層 CUDA 版本（`bin\13.2\x64`、`include\13.2`）；少寫這一層
+   > 會撈到 0 個檔而**靜默跳過**，這正是 include 最常漏掉的原因。
+   > DLL 放 `bin\` 或 `bin\x64\` 都算到位（兩個都在 PATH 上）。
 
 ## 升級指令（照輸出用，不要猜）
 
@@ -262,6 +314,41 @@ python -m pip install --upgrade torchaudio torchcodec
 winget upgrade Ollama.Ollama
 ```
 
+## GPU 效能基準（bench_gpu.py）
+
+`bench_gpu.py` 量五件事，全部實際操 GPU（輸出全英文）：
+
+| 區塊 | 內容 |
+|---|---|
+| `[cuBLAS]` | matmul 4096³：fp32（TF32 off／on）、fp16、bf16 → ms 與 TFLOPS |
+| `[cuDNN]` | conv2d：ResNet stem（224）與 mid（56）在 fp32／TF32／fp16，contiguous vs channels_last |
+| `[cuDNN] benchmark` | `torch.backends.cudnn.benchmark` 開關前後（含 autotune 時間） |
+| `[attention]` | SDPA fp16（flash attention）延遲與 TFLOPS |
+| `[HF baselines]` | 快取模型（離線）：DistilBERT SST-2 texts/s、ViT-base 224 ms/img |
+
+```powershell
+python scripts\bench_gpu.py                                  # 全部（約 1 分鐘）
+python scripts\bench_gpu.py --skip-hf                        # 只微基準
+python scripts\bench_gpu.py --only-hf --db-batch 64 --vit-batch 1
+python scripts\bench_gpu.py --quick --json-out bench.json    # 快速（升級前後對比用）
+```
+
+### 本機基線（2026-10-22 實測，RTX 4090 / torch 2.14.1+cu132 / cuDNN 9.24.0）
+
+| 項目 | 數字 | 備註 |
+|---|---|---|
+| matmul fp32（TF32 off → on） | 59.8 → **82.5 TFLOPS** | TF32 +38% |
+| matmul fp16／bf16 | **185.4**／159.5 TFLOPS | |
+| conv mid 56 fp32 → fp16 → fp16+channels_last | 1.771 → 1.020 → **0.790 ms** | 2.24×；VRAM 656 → 107 MB |
+| `cudnn.benchmark` 開關 | 1.836 → 1.836 ms（1.00×） | 固定形狀沒差；autotune 只花 0.03 s |
+| SDPA fp16（flash） | 0.074 ms／116.3 TFLOPS | |
+| DistilBERT SST-2（batch 64） | **3,130 texts/s** | 文章基線 3,243 texts/s（±4%） |
+| ViT-base 224（batch 1／32） | 5.51／1.00 ms/img | 文章基線 5.7 ms/img |
+
+> 用途：升級前後對比與「升級後有沒有變慢」的判準。數字是閒置 GPU 單次量測，逐次誤差約數 %。
+> 三個可調開關：`torch.backends.cuda.matmul.allow_tf32`（fp32 matmul +38%）、
+> AMP＋`channels_last`（conv 最多 2.24×）、`cudnn.benchmark`（輸入形狀多變才需要）。
+
 ## 設計與資料來源
 
 | 項目 | 來源 |
@@ -271,6 +358,9 @@ winget upgrade Ollama.Ollama
 | 套件最新版 | `https://pypi.org/pypi/<pkg>/json` |
 | torch 最高支援 Python | PyPI 上 torch wheel 的 `cp3XX` tag |
 | 最新可用 CUDA 索引 | `https://download.pytorch.org/whl/` ＋ 實際 HEAD wheel |
+| cuDNN 檔案（預設） | 掃 `torch\lib\cudnn*.dll`（Linux：`nvidia/cudnn/lib`）— 只讀檔，不匯入 torch |
+| cuDNN 可用性／版本（`--runtime`） | `torch.backends.cudnn.is_available()` / `version()`、`GetModuleHandleW` 取得實際載入路徑 |
+| cuDNN 是否完整複製進 CUDA | 比對 `CUDNN\v*` 與 `CUDA\v*` 的 `bin`／`include`／`lib\x64`（檔名＋大小；`bin` 接受 `bin\` 或 `bin\x64\`） |
 | Ollama 本機版本 | `http://localhost:11434/api/version` |
 | Ollama 最新版 | GitHub Releases API |
 | GPU／驅動 | `nvidia-smi`（解析 `CUDA UMD Version` 或 `CUDA Version`） |
@@ -296,6 +386,9 @@ winget upgrade Ollama.Ollama
 | `Ollama: not running` | Ollama 服務沒開 | 啟動 Ollama，或忽略該行 |
 | 沒有 GPU 行 | 找不到 `nvidia-smi` | 非 NVIDIA 機器／未安裝驅動 |
 | 想看的套件不在表內 | 只涵蓋固定清單 | 改 `PACKAGES` 常數，或直接用 `pip index versions <pkg>` |
+| `cuDNN: not available` | torch 載不到 cuDNN（版本不匹配／DLL 載入失敗） | 重裝對應索引的 torch（`--index-url https://download.pytorch.org/whl/cu132`）；**不要**手動複製 cuDNN |
+| `cuDNN: present (not verified)` | 這次沒加 `--runtime` | 加 `--runtime` 就會有版本並變成 `ok` |
+| `cuDNN: check failed` | `--runtime` 連 torch 都匯入失敗 | 先修 torch（看同一行的錯誤訊息） |
 
 ## 相關檔案
 
@@ -303,7 +396,8 @@ winget upgrade Ollama.Ollama
 |---|---|
 | [scripts/check_stack.py](scripts/check_stack.py) | 主程式（STDLIB only） |
 | [scripts/run_daily.ps1](scripts/run_daily.ps1) | 每日 23:00 排程包裝：檢查、自動升級、回滾、日誌、toast |
-| [scripts/auto_update.py](scripts/auto_update.py) | 升級執行器：快照 → pip 升級 → 煙霧測試 → 失敗回滾 |
+| [scripts/auto_update.py](scripts/auto_update.py) | 升級執行器：快照 → pip 升級 → 煙霧測試 → 失敗回滾（`--bench` 可加升級前後效能對比） |
+| [scripts/bench_gpu.py](scripts/bench_gpu.py) | GPU 效能基準：cuBLAS／cuDNN／cudnn.benchmark／SDPA／HF 基線（`--quick`、`--json-out`） |
 | [scripts/notify.ps1](scripts/notify.ps1) | Windows toast 通知（WinRT，免外部模組） |
 | `C:\\Users\\princ\\.agents\\skills\\authoring-agent-skills` | skill 撰寫／驗證規範 |
 
@@ -311,6 +405,9 @@ winget upgrade Ollama.Ollama
 
 | 版本 | 日期 | 變更 |
 |---|---|---|
+| 2.3.0 | 2026-10-22 | 新增 **GPU 效能基準** `bench_gpu.py`（cuBLAS／cuDNN／cudnn.benchmark／SDPA／HF 基線＋本機基線表）；`check_stack.py --bench` 把基準放進報告；`auto_update.py --bench` 升級前後各跑一次並輸出 `bench_delta`；`run_daily.ps1 -Bench` 串起兩者 |
+| 2.2.0 | 2026-10-22 | 新增 **CUDA 目錄 cuDNN 齊全度**檢查：比對 `CUDNN\v*` 與 `CUDA\v*` 的 `bin`／`include`／`lib\x64`（檔名＋大小），缺檔進 `warnings` 並給複製指令；新增 `cuda_cudnn` JSON 欄位 |
+| 2.1.0 | 2026-10-22 | 新增 **cuDNN 檢查**：預設掃 `torch\lib` 檔案、`--runtime` 用官方 API 實測（含實際載入的 cudnn DLL 與 GPU 卷積）；新增 `cuDNN` 表格列、`cudnn`／`runtime_detail`／`warnings` JSON 區塊；煙霧測試加 cuDNN 卷積（CUDA 可用但 cuDNN 不可用即回滾）；排程改用 `--runtime` 並在狀態檔寫 `CUDNN_PROBLEM` |
 | 2.0.2 | 2026-10-21 | 新增 GitHub Actions CI、README 徽章、tag 觸發 Release 自動化 |
 | 2.0.1 | 2026-10-21 | 腳本可攜化：`$PSScriptRoot`、`-Python`／`-LogDir` 參數，移除寫死路徑 |
 | 2.0.0 | 2026-10-21 | 方案 C：自動升級 + 快照 + 煙霧測試 + 失敗回滾（`auto_update.py`）；排程改為 `-AutoUpdate` |
