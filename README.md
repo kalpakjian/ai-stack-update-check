@@ -170,6 +170,8 @@ at the scheduled time, `StartWhenAvailable` runs it on the next wake.
 
 ## How rollback works
 
+![Auto-update and rollback flow](docs/auto-update-flow.svg)
+
 1. `pip freeze` snapshot before touching anything.
 2. Upgrade via `pip install --upgrade ...`.
 3. Smoke test: import every key package and run a GPU matmul.
