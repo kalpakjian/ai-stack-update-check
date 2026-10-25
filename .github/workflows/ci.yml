@@ -34,3 +34,69 @@ jobs:
       - name: Validate JSON shape
         run: |
           python -c "import json; d=json.load(open('report.json', encoding='utf-8')); assert 'rows' in d and 'updates' in d and len(d['rows']) >= 10; print('rows:', len(d['rows']))"
+
+  linux:
+    name: Linux scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Byte-compile scripts
+        run: |
+          python -m py_compile \
+            scripts/check_stack.py \
+            scripts/auto_update.py \
+            scripts/linux/audit_venv.py \
+            scripts/linux/bench_stack.py \
+            scripts/linux/cleanup_cu12_orphans.py \
+            scripts/linux/compare.py \
+            scripts/linux/trim_tensorrt_resources.py
+
+      - name: Shell syntax check
+        run: |
+          for f in scripts/linux/*.sh; do bash -n "$f"; echo "ok: $f"; done
+
+      - name: Offline version check
+        run: python scripts/check_stack.py --no-network
+
+      - name: JSON report
+        run: python scripts/check_stack.py --no-network --json-out report.json
+
+      - name: Validate JSON shape
+        run: |
+          python -c "import json; d=json.load(open('report.json', encoding='utf-8')); assert 'rows' in d and 'updates' in d and len(d['rows']) >= 10; print('rows:', len(d['rows']))"
+
+      - name: Linux system rows present
+        run: |
+          python -c "import json; d=json.load(open('report.json', encoding='utf-8')); lin=d['linux']; assert 'kernel' in lin, lin; print('kernel:', lin['kernel'])"
+
+      - name: TensorRT trim dry-run classifies the right blobs
+        run: |
+          mkdir -p /tmp/fakevenv/lib/python3.12/site-packages/tensorrt_libs
+          cd /tmp/fakevenv/lib/python3.12/site-packages/tensorrt_libs
+          touch libnvinfer_builder_resource_sm89.so.11.3.0 \
+                libnvinfer_builder_resource_ptx.so.11.3.0 \
+                libnvinfer_builder_resource_sm90.so.11.3.0 \
+                libnvinfer_builder_resource_win_sm89.so.11.3.0 \
+                libnvinfer.so.11
+          cd "$GITHUB_WORKSPACE"
+          python scripts/linux/trim_tensorrt_resources.py --venv /tmp/fakevenv --keep-arch sm89 \
+            | tee /tmp/trim.txt
+          grep -q 'win_sm89' /tmp/trim.txt
+          grep -q 'sm90' /tmp/trim.txt
+          grep -q 'dry-run' /tmp/trim.txt
+
+      - name: TensorRT trim apply/restore round-trip
+        run: |
+          python scripts/linux/trim_tensorrt_resources.py --venv /tmp/fakevenv --keep-arch sm89 --apply
+          test ! -e /tmp/fakevenv/lib/python3.12/site-packages/tensorrt_libs/libnvinfer_builder_resource_win_sm89.so.11.3.0
+          test -e /tmp/fakevenv/lib/python3.12/site-packages/tensorrt_libs/libnvinfer_builder_resource_sm89.so.11.3.0
+          python scripts/linux/trim_tensorrt_resources.py --venv /tmp/fakevenv --restore
+          test -e /tmp/fakevenv/lib/python3.12/site-packages/tensorrt_libs/libnvinfer_builder_resource_win_sm89.so.11.3.0
+
+      - name: audit_venv.py --help
+        run: python scripts/linux/audit_venv.py --help

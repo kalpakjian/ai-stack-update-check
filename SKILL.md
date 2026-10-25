@@ -1,10 +1,10 @@
 ---
 name: ai-stack-update-check
-description: "檢查本機 AI 堆疊是否有新版：Python 預設版本、PyTorch/CUDA wheel、cuDNN（裝好未／版本／有沒有完整複製進 CUDA 目錄／可自動補檔）、torchvision、torchaudio、torchcodec、transformers、datasets、accelerate、numpy、pandas、Ollama 與 GPU 驅動；可用 --runtime 實測 CUDA 與 cuDNN、--bench 跑 GPU 效能基準、--fix-cudnn 觸發提權工作補檔。WHEN: 檢查更新, 睇下有冇新版, 版本檢查, Python 版本, 最新版本, PyTorch 有冇更新, CUDA wheel 版本, cuDNN 版本, cuDNN 有冇裝好, cudnn 裝好未, cuDNN 複製, cuDNN 抄過去未, include 漏咗, cuDNN 補檔, GPU 效能, 跑分, benchmark, TFLOPS, cuDNN 優化, 有冇變慢, torch 版本, transformers 版本, Ollama 更新, 套件過期, outdated, update check, version check, upgrade check, 依家裝咗咩版本, 個 stack 更唔更新. DO NOT USE FOR: 直接執行升級安裝（除非用戶明確要求，照輸出指令做）、一般 pip list／pip freeze 查詢、非 AI 套件的版本管理、切換 Python 直譯器（用 py launcher 或 uv）。"
+description: "檢查本機 AI 堆疊是否有新版：Python 預設版本、PyTorch/CUDA wheel、cuDNN（裝好未／版本／有沒有完整複製進 CUDA 目錄／可自動補檔）、torchvision、torchaudio、torchcodec、transformers、datasets、accelerate、numpy、pandas、Ollama 與 GPU 驅動；可用 --runtime 實測 CUDA 與 cuDNN、--bench 跑 GPU 效能基準、--fix-cudnn 觸發提權工作補檔。Linux/Arch 另可查 NVIDIA DKMS 驅動套件與已載入版本是否一致（要不要重開機）、kernel 版本、pacman 可升級套件、venv 完整性稽核（audit_venv.py）與 TensorRT 資源檔裁切。WHEN: 檢查更新, 睇下有冇新版, 版本檢查, Python 版本, 最新版本, PyTorch 有冇更新, CUDA wheel 版本, cuDNN 版本, cuDNN 有冇裝好, cudnn 裝好未, cuDNN 複製, cuDNN 抄過去未, include 漏咗, cuDNN 補檔, GPU 效能, 跑分, benchmark, TFLOPS, cuDNN 優化, 有冇變慢, torch 版本, transformers 版本, Ollama 更新, 套件過期, outdated, update check, version check, upgrade check, 依家裝咗咩版本, 個 stack 更唔更新, Linux 更新, Arch 更新, Omarchy, pacman 更新, 驅動版本, DKMS, 要唔要重開機, venv 稽核, TensorRT 資源, 磁碟空間, 回收空間, systemd 排程, 桌面通知. DO NOT USE FOR: 直接執行升級安裝（除非用戶明確要求，照輸出指令做）、一般 pip list／pip freeze 查詢、非 AI 套件的版本管理、切換 Python 直譯器（用 py launcher 或 uv）。"
 license: MIT
 metadata:
   author: local
-  version: "2.4.0"
+  version: "2.5.0"
   root: "C:\\Users\\princ"
 ---
 
@@ -386,6 +386,67 @@ python scripts\bench_gpu.py --quick --json-out bench.json    # 快速（升級�
 > 三個可調開關：`torch.backends.cuda.matmul.allow_tf32`（fp32 matmul +38%）、
 > AMP＋`channels_last`（conv 最多 2.24×）、`cudnn.benchmark`（輸入形狀多變才需要）。
 
+## Linux／Omarchy（Arch）
+
+同一支 `scripts/check_stack.py` 兩邊通用，Linux 會自動改探 `manylinux_2_28_x86_64`
+wheel，並多報三列系統層資訊。
+
+### 快速用法
+
+```bash
+cd ~/Projects/ai-stack-update-check
+
+# 堆疊檢查（--runtime 會 import torch 實測 CUDA 與 cuDNN）
+~/Projects/ComfyUI/.venv/bin/python scripts/check_stack.py --runtime
+
+# 單一 venv 的 22 項完整性稽核
+scripts/linux/audit_venv.py ~/Projects/ComfyUI/.venv --label stable
+scripts/linux/audit_venv.py ~/Projects/ComfyUI/.venv-nightly --label nightly
+
+# 驅動／CUDA／兩個 venv／功能測試；--full 再加 ComfyUI 實機煙霧測試
+scripts/linux/verify_stack.sh --full
+
+# 磁碟空間：把 TensorRT 永遠用不到的架構資源檔搬走（dry-run → apply → purge）
+scripts/linux/trim_tensorrt_resources.py --venv ~/Projects/ComfyUI/.venv-nightly
+```
+
+### 每日排程（systemd user timer，23:00）
+
+```bash
+scripts/linux/install_systemd_user.sh          # 安裝 + 啟用
+systemctl --user start ai-stack-check.service   # 立刻跑一次
+systemctl --user list-timers ai-stack-check.timer --no-pager
+journalctl --user -u ai-stack-check.service -n 50 --no-pager
+```
+
+| 項目 | 值 |
+|---|---|
+| Unit | `ai-stack-check.service` + `ai-stack-check.timer`（**user** scope，不需要 root） |
+| 觸發時間 | 每天 23:00（`RandomizedDelaySec=300`） |
+| 補跑 | `Persistent=true` —— 當時關機的話，開機後會補跑 |
+| 日誌 | `${XDG_STATE_HOME:-$HOME/.local/state}/ai-stack-update-check/stack-check-YYYY-MM-DD.log` |
+| 狀態檔 | 同目錄 `stack-check-status.txt`（`OK` / `UPDATES: …` / `PROBLEM: …`） |
+| 保留期限 | 90 天 |
+| 桌面通知 | `notify-send`（`notify.sh`；沒有 session bus 時退回寫 journal） |
+| 登出也要跑 | `sudo loginctl enable-linger "$USER"` |
+
+### Linux 硬規則
+
+1. **不要自動升級。** Windows 的 `run_daily.ps1 -AutoUpdate` 在 Linux 沒有對應功能，
+   而且刻意不做：`pacman` 是 rolling release（partial upgrade 會弄壞系統）、
+   NVIDIA 驅動是 DKMS 套件（升級後**一定要重開機**）、cu12/cu13 wheel 會互相覆寫、
+   torch nightly 本身就不穩定。Linux 這邊只檢查與通知。
+2. **驅動套件版本 ≠ 目前載入的驅動版本** 就是「還沒重開機」。
+   `check_stack.py` 會把兩者分開報，並在 `warnings` 提示要重開機。
+3. **不要用 `pacman -Sy` 單獨更新資料庫**，會造成 partial upgrade。
+   要看可升級清單用 `checkupdates`（pacman-contrib）或唯讀的 `pacman -Qu`。
+4. **cu12 與 cu13 不要混在同一個 venv**：兩者安裝到重疊路徑，孤兒的
+   `nvidia_*_cu12-*` dist-info 會覆寫 cu13 的 `.so`（`libtorch_cuda.so: undefined symbol`）。
+   用 `cleanup_cu12_orphans.py` 收拾，用 `audit_venv.py` 檢查。
+5. **裁切 TensorRT 資源檔後要驗證**：`--apply` 只是搬到 venv 外的暫存區，
+   確認 builder 與 engine 反序列化正常後才 `--purge`（真正釋放空間）；
+   有問題用 `--restore` 還原。
+
 ## 設計與資料來源
 
 | 項目 | 來源 |
@@ -443,12 +504,22 @@ python scripts\bench_gpu.py --quick --json-out bench.json    # 快速（升級�
 | [scripts/sync_cudnn.ps1](scripts/sync_cudnn.ps1) | 提權工作本體：把缺的 cuDNN 檔補進 `CUDA\v*`（幂等、`-WhatIf`、寫 `cudnn-sync-*.log`） |
 | [scripts/register_cudnn_sync_task.ps1](scripts/register_cudnn_sync_task.ps1) | 一次性註冊／移除提權排程工作「AI Stack cuDNN Sync」（需管理員） |
 | [scripts/notify.ps1](scripts/notify.ps1) | Windows toast 通知（WinRT，免外部模組） |
+| [scripts/linux/run_daily.sh](scripts/linux/run_daily.sh) | Linux 每日檢查：堆疊檢查 → 各 venv 稽核 → 日誌 → 桌面通知 |
+| [scripts/linux/notify.sh](scripts/linux/notify.sh) | Linux 桌面通知（`notify-send`，免外部模組） |
+| [scripts/linux/install_systemd_user.sh](scripts/linux/install_systemd_user.sh) | 安裝／移除 systemd **user** 排程（`ai-stack-check.service` + `.timer`） |
+| [scripts/linux/verify_stack.sh](scripts/linux/verify_stack.sh) | 驅動／CUDA／兩個 venv／功能測試；`--full` 加 ComfyUI 實機煙霧測試 |
+| [scripts/linux/audit_venv.py](scripts/linux/audit_venv.py) | 單一 venv 的 22 項完整性稽核（cu12/cu13 混裝、RECORD、cuDNN 三方驗證、NCCL、功能測試、`uv pip check`） |
+| [scripts/linux/bench_stack.py](scripts/linux/bench_stack.py) | Linux 版 GPU 效能基準（cuBLAS／cuDNN／SDPA／`cudnn.benchmark`），輸出 JSON |
+| [scripts/linux/compare.py](scripts/linux/compare.py) | 多份基準 JSON 的對照表 |
+| [scripts/linux/cleanup_cu12_orphans.py](scripts/linux/cleanup_cu12_orphans.py) | 清掉孤兒的 `nvidia_*_cu12-*` dist-info（cu12/cu13 覆寫陷阱） |
+| [scripts/linux/trim_tensorrt_resources.py](scripts/linux/trim_tensorrt_resources.py) | 裁掉用不到的 TensorRT GPU 架構資源檔（RTX 4090 約可回收 3.2 GiB） |
 | `C:\\Users\\princ\\.agents\\skills\\authoring-agent-skills` | skill 撰寫／驗證規範 |
 
 ## 變更記錄
 
 | 版本 | 日期 | 變更 |
 |---|---|---|
+| 2.5.0 | 2026-10-26 | **新增 Linux／Omarchy 支援**：`scripts/linux/` 開源（`audit_venv.py` 22 項 venv 稽核、`verify_stack.sh`、`bench_stack.py`、`compare.py`、`cleanup_cu12_orphans.py`、新寫的 `trim_tensorrt_resources.py`）；`run_daily.sh` ＋ `notify.sh` ＋ `install_systemd_user.sh` 提供 **systemd user timer**（每日 23:00、`Persistent=true`、90 天日誌、`notify-send` 桌面通知）；`check_stack.py` 平台化（Linux 改探 `manylinux_2_28_x86_64` wheel，新增 NVIDIA DKMS 驅動套件 vs. 已載入版本、kernel、`pacman` 可升級套件三列）。Linux **刻意不做自動升級**（pacman rolling release／DKMS 需重開機／cu12-cu13 覆寫／nightly 不穩定） |
 | 2.4.0 | 2026-10-22 | 新增 **cuDNN 自動補檔**：`sync_cudnn.ps1`（提權工作本體）＋`register_cudnn_sync_task.ps1`（一次性註冊「AI Stack cuDNN Sync」）＋`check_stack.py --fix-cudnn`／`run_daily.ps1`（工作存在就自動觸發），解決「非提權行程不能寫 Program Files」的斷點 |
 | 2.3.0 | 2026-10-22 | 新增 **GPU 效能基準** `bench_gpu.py`（cuBLAS／cuDNN／cudnn.benchmark／SDPA／HF 基線＋本機基線表）；`check_stack.py --bench` 把基準放進報告；`auto_update.py --bench` 升級前後各跑一次並輸出 `bench_delta`；`run_daily.ps1 -Bench` 串起兩者 |
 | 2.2.0 | 2026-10-22 | 新增 **CUDA 目錄 cuDNN 齊全度**檢查：比對 `CUDNN\v*` 與 `CUDA\v*` 的 `bin`／`include`／`lib\x64`（檔名＋大小），缺檔進 `warnings` 並給複製指令；新增 `cuda_cudnn` JSON 欄位 |

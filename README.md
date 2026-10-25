@@ -5,10 +5,15 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D4)]()
+[![Platform: Linux](https://img.shields.io/badge/platform-Linux%2FArch-FCC624)]()
 
-Check, notify, and **safely auto-update** a local AI stack on Windows:
+Check, notify, and **safely auto-update** a local AI stack on Windows **and Linux/Arch**:
 Python, PyTorch (CUDA wheels), **cuDNN readiness**, torchvision, torchaudio,
 torchcodec, transformers, datasets, accelerate, numpy, pandas, and Ollama.
+
+On Linux the stack checker also reports the **system layer**: NVIDIA DKMS driver
+package vs. the driver actually loaded (a driver upgrade needs a reboot),
+the running kernel, and pending `pacman` upgrades.
 
 The core rule: **a newer Python is not always a safe Python.** PyTorch ships
 wheels only up to a specific `cpXY` tag, so this tool derives compatibility from
@@ -71,11 +76,13 @@ back on failure.
 
 ## Requirements
 
-- Windows 10/11
-- Python 3.10+ (tested on 3.14.8)
+- Windows 10/11 **or** Linux (Arch / Omarchy) — the checker runs on both
+- Python 3.10+ (tested on 3.14.8 and 3.12.14)
 - No third-party Python packages — the checker uses only the standard library
 - Optional: NVIDIA GPU for `--runtime` and the full smoke test
 - Optional: Ollama running on `http://localhost:11434`
+- Linux only (optional): `libnotify` for desktop notifications, `pacman-contrib`
+  for `checkupdates`
 
 ## Quick start
 
@@ -344,7 +351,125 @@ it when input shapes vary).
 | Ollama local / latest | `http://localhost:11434/api/version`, GitHub Releases |
 | GPU / driver | `nvidia-smi` (`CUDA UMD Version` or `CUDA Version`) |
 
+## Linux / Arch (Omarchy)
+
+The Windows side is `run_daily.ps1` + Task Scheduler. The Linux side is
+`scripts/linux/` + a **systemd user timer**, and it deliberately does *not*
+auto-upgrade — see [Why no auto-upgrade on Linux](#why-no-auto-upgrade-on-linux).
+
+### The Linux tools
+
+| Script | What it does |
+|---|---|
+| `scripts/linux/run_daily.sh` | Daily entry point: stack check → per-venv audit → log → desktop notification |
+| `scripts/linux/notify.sh` | Desktop notification via `notify-send` (no third-party module); degrades to stderr when there is no session bus |
+| `scripts/linux/install_systemd_user.sh` | Installs/removes the `ai-stack-check.service` + `.timer` user units |
+| `scripts/linux/verify_stack.sh` | Driver / CUDA / both venvs / functional GPU tests / ComfyUI smoke test |
+| `scripts/linux/audit_venv.py` | 22-point integrity audit of **one** venv (see below) |
+| `scripts/linux/bench_stack.py` | Reproducible GPU benchmark (cuBLAS / cuDNN / SDPA / `cudnn.benchmark`) writing JSON |
+| `scripts/linux/compare.py` | Side-by-side table of several benchmark JSON files |
+| `scripts/linux/cleanup_cu12_orphans.py` | Removes orphaned `nvidia_*_cu12-*` dist-info dirs (the cu12/cu13 file-overwrite trap) |
+| `scripts/linux/trim_tensorrt_resources.py` | Removes TensorRT GPU-architecture blobs you will never load (see below) |
+
+`scripts/check_stack.py` itself is shared: it detects the platform and probes
+`win_amd64` or `manylinux_2_28_x86_64` wheels accordingly, and adds the Linux
+system rows (driver package vs. running driver, kernel, pending `pacman` upgrades).
+
+### Install the daily timer
+
+```bash
+cd scripts/linux
+./install_systemd_user.sh          # install + enable
+systemctl --user start ai-stack-check.service   # run once now
+journalctl --user -u ai-stack-check.service -n 50 --no-pager
+```
+
+The timer fires daily at 23:00 with `Persistent=true` (it catches up after a
+reboot) and `RandomizedDelaySec=300`. Artifacts land in
+`${XDG_STATE_HOME:-~/.local/state}/ai-stack-update-check/`:
+
+| File | Contents |
+|---|---|
+| `stack-check-YYYY-MM-DD.log` | full run log (kept 90 days) |
+| `stack-check-status.txt` | `OK` / `UPDATES: ...` / `PROBLEM: ...` |
+| `stack-check-report-YYYY-MM-DD.json` | the checker report |
+
+To also run while logged out: `sudo loginctl enable-linger "$USER"`.
+
+### The two-venv layout
+
+The Linux setup that motivated these tools keeps two isolated venvs next to
+ComfyUI — a stable one and a nightly one:
+
+```
+~/Projects/ComfyUI/.venv           torch 2.14.1+cu132        (stable, PyPI release)
+~/Projects/ComfyUI/.venv-nightly   torch 2.16.0.dev…+cu134   (nightly, cu134 index)
+```
+
+They must not be mixed: the `cu12` and `cu13` NVIDIA wheels install to
+**overlapping paths** (`nvidia/nccl/lib/libnccl.so.2`), so an upgrade in one venv
+can silently replace a `.so` the other venv depends on. `audit_venv.py` exists to
+prove each venv is internally consistent:
+
+```bash
+scripts/linux/audit_venv.py ~/Projects/ComfyUI/.venv --label stable
+scripts/linux/audit_venv.py ~/Projects/ComfyUI/.venv-nightly --label nightly
+```
+
+22 checks in 7 groups: core packages, cu12/cu13 consistency, install integrity
+(RECORD / orphan dist-info / file ownership), cuDNN correctness (metadata vs.
+`torch.backends.cudnn.version()` vs. the on-disk `.so` vs. the actually loaded
+path), NCCL symbols, functional GPU tests (matmul / cuDNN conv against an fp32
+reference / SDPA / `torch.compile` / torchvision NMS / torchaudio DSP), and
+`uv pip check`.
+
+### Trimming TensorRT resources
+
+NVIDIA's `tensorrt_cu13_libs` wheel ships **every** GPU architecture's builder
+resource — plus the Windows-only copies — inside `tensorrt_libs/`. On a Linux
+box with an RTX 4090 that is ~4.4 GiB, of which ~3.2 GiB is never loaded:
+
+| File group | Size | Needed on RTX 4090 (sm_89) |
+|---|---|---|
+| `libnvinfer_builder_resource_sm89.so` | 180 MiB | yes |
+| `libnvinfer_builder_resource_ptx.so` | 230 MiB | yes (PTX JIT fallback) |
+| `libnvinfer_builder_resource_sm75/80/86/90/100/120.so` | 1.41 GiB | no |
+| `libnvinfer_builder_resource_win_*.so` (8 files) | 1.81 GiB | no (Windows only) |
+| `libnvinfer.so` / `_plugin.so` / `_onnxparser.so` | 0.71 GiB | yes |
+
+```bash
+# dry-run: shows what would go and how much space
+scripts/linux/trim_tensorrt_resources.py --venv ~/Projects/ComfyUI/.venv-nightly
+
+# move them aside (outside the venv, same filesystem → instant)
+scripts/linux/trim_tensorrt_resources.py --venv ~/Projects/ComfyUI/.venv-nightly --apply
+
+# verify TensorRT still builds and deserializes, then reclaim the space for good
+scripts/linux/trim_tensorrt_resources.py --venv ~/Projects/ComfyUI/.venv-nightly --purge
+
+# if something broke
+scripts/linux/trim_tensorrt_resources.py --venv ~/Projects/ComfyUI/.venv-nightly --restore
+```
+
+`RECORD` is left untouched, so `pip check` / `uv pip check` still pass.
+
+### Why no auto-upgrade on Linux
+
+The Windows `run_daily.ps1 -AutoUpdate` path has no Linux counterpart on
+purpose:
+
+| Risk on Linux | Consequence |
+|---|---|
+| `pacman` is a rolling release | a partial upgrade bricks the system |
+| NVIDIA drivers are DKMS packages | the new driver only loads **after a reboot** |
+| `cu12`/`cu13` wheels share install paths | `pip` can overwrite a `.so` another venv needs |
+| `torch` nightly builds | a nightly can break the working venv without warning |
+
+So the Linux job **checks and notifies**; the upgrade stays a human decision.
+
 ## Tested environment
+
+**Windows**
 
 | Component | Version |
 |---|---|
@@ -356,6 +481,20 @@ it when input shapes vary).
 | transformers / datasets / accelerate | 5.20.2 / 5.1.0 / 1.15.0 |
 | GPU | NVIDIA GeForce RTX 4090, driver 617.42 |
 | Ollama | 0.40.6 |
+
+**Linux (Omarchy / Arch)**
+
+| Component | Version |
+|---|---|
+| OS | Omarchy (Arch), kernel 7.2.8-9-omarchy, Hyprland/Wayland |
+| Python | 3.12.14 |
+| torch stable / nightly | 2.14.1+cu132 / 2.16.0.dev20261025+cu134 |
+| torchvision | 0.29.1+cu132 / 0.30.0.dev20261025+cu134 |
+| cuDNN | 9.24.0 (stable) / 9.26.0.51 (nightly) |
+| NVIDIA driver | `nvidia-open-dkms` 615.78.08 (running 615.78.08) |
+| TensorRT | 11.3.0.99 (nightly only, `cu13` wheel) |
+| GPU | NVIDIA GeForce RTX 4090, driver 615.78.08, CUDA UMD 13.4 |
+| Scheduler | systemd user timer (`ai-stack-check.timer`) |
 
 ## Using it as an agent skill
 
@@ -386,6 +525,17 @@ installing it.
   not support the new interpreter yet.
 - **PowerShell + git:** `git push` writes progress to stderr; PowerShell may show
   it as an error even when the push succeeded. Check `git ls-remote` instead.
+- **Linux: the driver needs a reboot.** `nvidia-open-dkms` is a DKMS package —
+  upgrading it does not change the loaded module until you reboot. The checker
+  reports the package version and the running version separately so the
+  difference is visible.
+- **Linux: never mix `cu12` and `cu13` wheels in one venv.** They install to
+  overlapping paths, so a leftover `nvidia_*_cu12-*` dist-info can overwrite a
+  `.so` the `cu13` package owns (`libtorch_cuda.so: undefined symbol`).
+  `cleanup_cu12_orphans.py` cleans this up; `audit_venv.py` detects it.
+- **Linux: `checkupdates` is safe, `pacman -Sy` is not.** `checkupdates` (from
+  `pacman-contrib`) compares against a throwaway sync database; `pacman -Sy`
+  alone can produce a partial upgrade and brick the system.
 
 ## License
 
@@ -411,4 +561,24 @@ cuDNN 隨 torch wheel 一起安裝（`torch\lib\cudnn*.dll`），不能單獨 pi
 自動回滾到原本版本。搭配 Windows 工作排程器可每天固定時間執行，並用 toast 通知
 結果；加 `-Bench` 會在升級前後各跑一次 GPU 效能基準（cuBLAS／cuDNN／HF 基線），
 把 `bench_delta` 寫進日誌，用來判斷「新版有沒有變慢」。
+
+### Linux／Omarchy 那邊
+
+同一支 `scripts/check_stack.py` 會自己判斷平台：Windows 探 `win_amd64` wheel，
+Linux 探 `manylinux_2_28_x86_64`；Linux 還多三列系統層資訊——NVIDIA 驅動套件版本
+對照**目前實際載入的驅動版本**（DKMS 套件升級後要重開機才會換掉）、正在跑的
+kernel、以及 `pacman` 上可升級的套件清單。
+
+`scripts/linux/` 底下是 Linux 專用的工具：`audit_venv.py` 會對單一 venv 做 22 項
+完整性檢查（core 套件、cu12/cu13 混裝、RECORD／孤兒 dist-info、cuDNN 三方版本
+交叉驗證、NCCL 符號、功能測試、`uv pip check`）；`verify_stack.sh` 驗驅動／CUDA／
+兩個 venv 並可加 `--full` 跑 ComfyUI 實機煙霧測試；`cleanup_cu12_orphans.py` 收拾
+cu12 孤兒套件；`trim_tensorrt_resources.py` 把 TensorRT 永遠不會載入的 GPU 架構
+資源檔（以及 Windows 專用的那 8 個）搬走，一台 RTX 4090 可以回收約 3.2 GiB。
+
+每日排程用 **systemd user timer**（`install_systemd_user.sh`）：每天 23:00 執行
+`run_daily.sh`，跑完堆疊檢查與兩個 venv 的稽核，寫日誌與狀態檔，再用
+`notify-send` 送桌面通知。Linux 這邊**刻意不做自動升級**：pacman 是 rolling
+release（partial upgrade 會弄壞系統）、驅動是 DKMS 套件（升級要重開機）、
+cu12/cu13 會互相覆寫、nightly 本身就不穩定——所以只檢查與通知，升級留給人決定。
 

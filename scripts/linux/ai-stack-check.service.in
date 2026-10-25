@@ -1,0 +1,13 @@
+[Unit]
+Description=AI stack daily update check (Linux)
+Documentation=https://github.com/kalpakjian/ai-stack-update-check
+
+[Service]
+Type=oneshot
+# user service 需要 D-Bus session 才能送桌面通知
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+# __REPO_DIR__ 會由 install_systemd_user.sh 換成實際路徑
+ExecStart=__REPO_DIR__/scripts/linux/run_daily.sh
+# 檢查可能要匯入 torch、跑 GPU 煙霧測試，給寬鬆一點的 timeout
+TimeoutStartSec=900
+Nice=10

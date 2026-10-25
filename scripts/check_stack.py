@@ -50,7 +50,18 @@ from datetime import datetime
 UA = {"User-Agent": "ai-stack-update-check/1.0 (local skill)"}
 PYPI_URL = "https://pypi.org/pypi/{pkg}/json"
 PYTORCH_ROOT = "https://download.pytorch.org/whl/"
-PYTORCH_WHEEL = "https://download.pytorch.org/whl/{cu}/torch-{ver}%2B{cu}-{tag}-{tag}-win_amd64.whl"
+IS_WINDOWS = os.name == "nt"
+IS_LINUX = sys.platform.startswith("linux")
+# PyTorch 的 CUDA 索引用平台特定的 wheel 標籤：Windows 是 win_amd64，
+# Linux 是 manylinux_2_28_x86_64（aarch64 是 manylinux_2_28_aarch64）。
+if IS_WINDOWS:
+    PLATFORM_TAG = "win_amd64"
+elif IS_LINUX:
+    PLATFORM_TAG = "manylinux_2_28_x86_64"
+else:
+    PLATFORM_TAG = "macosx_11_0_arm64"
+PYTORCH_WHEEL = ("https://download.pytorch.org/whl/{cu}/torch-{ver}%2B{cu}-{tag}-{tag}-"
+                 + PLATFORM_TAG + ".whl")
 OLLAMA_BASE = "http://localhost:11434"
 
 PACKAGES = [
@@ -372,6 +383,48 @@ def ollama_local():
         return {"version": None, "models": None}
 
 
+def pacman_outdated():
+    """列出可升級的系統套件（Arch/Omarchy）。
+
+    優先用 `checkupdates`（pacman-contrib）：它用獨立的暫存資料庫比對，
+    **不會**動到本機的 sync 資料庫，所以跑起來是安全的（不會造成 partial upgrade）。
+    沒有 checkupdates 就退回 `pacman -Qu`（唯讀）。
+    """
+    if shutil.which("checkupdates"):
+        out = run_cmd(["checkupdates"], timeout=90)
+    else:
+        out = run_cmd(["pacman", "-Qu"], timeout=90)
+    if not out:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def linux_extra():
+    """Linux/Arch 專屬資訊：NVIDIA 驅動套件、實際載入的驅動、核心、可升級系統套件。
+
+    Windows 上驅動更新走「工作排程器 + NVCleanstall」，這裡是 Linux 對應的
+    可視度：DKMS 驅動套件升級後 **必須重開機** 才會換到新驅動，
+    所以把「套件版本」與「目前載入的版本」分開回報，能直接看出是否已經重開機。
+    """
+    if not IS_LINUX:
+        return {}
+    out = {"kernel": os.uname().release}
+    for pkg in ("nvidia-open-dkms", "nvidia-dkms", "nvidia-open", "nvidia"):
+        q = run_cmd(["pacman", "-Q", pkg], timeout=10)
+        if q and q.startswith(pkg + " "):
+            out["driver_package"] = q.splitlines()[0].strip()
+            break
+    try:
+        with open("/proc/driver/nvidia/version", encoding="utf-8", errors="ignore") as fh:
+            m = re.search(r"Kernel Module\s+([\d.]+)", fh.read())
+            if m:
+                out["driver_running"] = m.group(1)
+    except OSError:
+        pass
+    out["outdated_packages"] = pacman_outdated()
+    return out
+
+
 def local_snapshot():
     return {
         "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -384,6 +437,7 @@ def local_snapshot():
         "cudnn": torch_cudnn_files(),
         "cuda_cudnn": cuda_cudnn_copies(),
         "ollama": ollama_local(),
+        "linux": linux_extra(),
     }
 
 
@@ -436,7 +490,7 @@ def cuda_indexes():
 
 
 def newest_usable_cuda(torch_latest, py_tag, indexes):
-    """找出『有實際 Windows wheel』的最新 CUDA 索引，而非只看目錄存在。"""
+    """找出『有實際 wheel（對應本平台）』的最新 CUDA 索引，而非只看目錄存在。"""
     if not torch_latest or not py_tag:
         return None
 
@@ -520,8 +574,37 @@ def build_report(local, remote, runtime=None, runtime_detail=None, bench=None, f
         if offline:
             notes.append("CUDA build: %s (online check skipped)" % inst_cu)
         else:
-            notes.append("CUDA build: %s (newest available for Windows: %s)"
-                         % (inst_cu, newest_cu or "none"))
+            notes.append("CUDA build: %s (newest available for %s: %s)"
+                         % (inst_cu, PLATFORM_TAG, newest_cu or "none"))
+
+    # ---- Linux/Arch 系統層：驅動套件、核心、可升級的系統套件 ----
+    lin = local.get("linux") or {}
+    if lin:
+        drv_pkg = lin.get("driver_package") or ""
+        drv_run = lin.get("driver_running")
+        pkg_ver = drv_pkg.split()[1] if len(drv_pkg.split()) > 1 else ""
+        pkg_base = re.sub(r"-\d+$", "", pkg_ver)   # 去掉 pkgrel（610.57.04-1 -> 610.57.04）
+        if drv_pkg:
+            if drv_run and pkg_base and pkg_base != drv_run:
+                rows.append({"component": "NVIDIA driver", "installed": drv_run,
+                             "latest": pkg_base, "status": "reboot required"})
+                warnings.append(
+                    "NVIDIA driver package %s is installed but %s is still running; "
+                    "reboot to load the new DKMS module." % (pkg_base, drv_run))
+            else:
+                rows.append({"component": "NVIDIA driver", "installed": drv_run or pkg_base,
+                             "latest": pkg_base or "?", "status": "up to date"})
+        if lin.get("kernel"):
+            rows.append({"component": "Kernel", "installed": lin["kernel"],
+                         "latest": "?", "status": "running"})
+        outdated = lin.get("outdated_packages") or []
+        if outdated:
+            rows.append({"component": "System packages", "installed": "?",
+                         "latest": "%d update(s)" % len(outdated),
+                         "status": "update available"})
+            updates.append("system-packages")
+            notes.append("System updates pending: " + ", ".join(outdated[:8])
+                         + (" ..." if len(outdated) > 8 else ""))
 
     # ---- cuDNN：隨 torch wheel 一起來，不是可獨立 pip 升級的套件 ----
     cudnn_files = local.get("cudnn") or {}
@@ -692,6 +775,7 @@ def build_report(local, remote, runtime=None, runtime_detail=None, bench=None, f
         "cuda_cudnn": local.get("cuda_cudnn") or [],
         "cudnn_fix": fix,
         "bench": bench,
+        "linux": local.get("linux") or {},
         "warnings": warnings,
         "commands": cmds,
         "ollama_models": (local.get("ollama") or {}).get("models"),
@@ -723,6 +807,9 @@ def render(report, as_json=False):
         print("Runtime: " + report["runtime"])
     if report.get("ollama_models") is not None:
         print("Ollama models: %s" % report["ollama_models"])
+    lin = report.get("linux") or {}
+    if lin.get("kernel"):
+        print("Kernel: %s" % lin["kernel"])
     if report.get("warnings"):
         print("\nWarnings:")
         for warning in report["warnings"]:
