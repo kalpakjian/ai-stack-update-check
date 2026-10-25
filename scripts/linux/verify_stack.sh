@@ -11,8 +11,19 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMFY="${COMFY:-${1:-$HOME/Projects/ComfyUI}}"
+COMFY="${COMFY:-$HOME/Projects/ComfyUI}"
 BENCH_DIR="${BENCH_DIR:-$SCRIPT_DIR}"
+FULL=0
+for arg in "$@"; do
+  case "${arg}" in
+    --full) FULL=1 ;;
+    -h|--help)
+      echo "用法：$(basename "$0") [--full] [ComfyUI 路徑]"
+      echo "環境變數：COMFY（ComfyUI 根目錄）、BENCH_DIR（基準 JSON 目錄）"
+      exit 0 ;;
+    *) COMFY="${arg}" ;;
+  esac
+done
 
 hr() { printf '%s\n' "------------------------------------------------------------"; }
 
@@ -123,7 +134,7 @@ else
 fi
 
 hr
-if [[ "${1:-}" == "--full" ]]; then
+if [[ "${FULL}" -eq 1 ]]; then
   echo "[6] ComfyUI 實機煙霧測試（每個 venv 各啟一次）"
   for venv in .venv .venv-nightly; do
     py="${COMFY}/${venv}/bin/python"
@@ -143,12 +154,10 @@ fi
 
 echo "完成。"
 echo
-echo "目前狀態:"
-echo "  stable  venv : torch 2.14.1+cu132 / torchaudio 2.11.0.dev20260902+cu132"
-echo "  nightly venv : torch 2.16.0.dev20261025+cu134 / cuDNN 9.26.0.51"
-echo
-echo "尚可進行:"
-echo "  ComfyUI 更新至 origin/master (落後 263 commit，上游已移除 torchaudio 依賴):"
-echo "    cd ${COMFY} && git pull"
-echo "  Python 3.15 遷移 (cu132/cu134 已有 cp315 wheel):"
-echo "    uv venv --python 3.15 ..."
+echo "下一步（視需要）："
+echo "  重新安裝 ComfyUI 的套件（上游改版後）:"
+echo "    cd ${COMFY} && git pull && uv pip install --python .venv/bin/python -r requirements.txt"
+echo "  裁掉用不到的 TensorRT 架構資源檔（RTX 4090 約可回收 3.2 GiB）:"
+echo "    ${SCRIPT_DIR}/trim_tensorrt_resources.py --venv ${COMFY}/.venv-nightly"
+echo "  開源後的每日排程（systemd user timer + 桌面通知）:"
+echo "    ${SCRIPT_DIR}/install_systemd_user.sh"
