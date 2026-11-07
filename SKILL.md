@@ -4,7 +4,7 @@ description: "檢查本機 AI 堆疊是否有新版：Python 預設版本、PyTo
 license: MIT
 metadata:
   author: local
-  version: "2.5.0"
+  version: "2.5.1"
   root: "C:\\Users\\princ"
 ---
 
@@ -519,6 +519,7 @@ journalctl --user -u ai-stack-check.service -n 50 --no-pager
 
 | 版本 | 日期 | 變更 |
 |---|---|---|
+| 2.5.1 | 2026-11-07 | 修掉三個**靜默錯誤**：① `check_stack.py` 拿完整版號比 torch 的 `cpXY` 上限（`vparse("3.15.2") > vparse("3.15")`），害 Python 3.15.2 被誤判成「受 torch 限制」——改成只比 major.minor；② Linux 驅動版本用 `r"Kernel Module\s+([\d.]+)"` 解析 `/proc/driver/nvidia/version`，但真實格式是 `NVRM version: … Module for x86_64  615.78.08  Release Build`，永遠不命中 → 「驅動套件版本 vs 已載入版本」退化為永遠 `up to date`（把「升級後還沒重開機」藏起來），改為解析 NVRM 行並退回 `nvidia-smi`；③ `verify_stack.sh` 把 `--full` 當成 ComfyUI 路徑。三者都補了回歸檢查 |
 | 2.5.0 | 2026-10-26 | **新增 Linux／Omarchy 支援**：`scripts/linux/` 開源（`audit_venv.py` 22 項 venv 稽核、`verify_stack.sh`、`bench_stack.py`、`compare.py`、`cleanup_cu12_orphans.py`、新寫的 `trim_tensorrt_resources.py`）；`run_daily.sh` ＋ `notify.sh` ＋ `install_systemd_user.sh` 提供 **systemd user timer**（每日 23:00、`Persistent=true`、90 天日誌、`notify-send` 桌面通知）；`check_stack.py` 平台化（Linux 改探 `manylinux_2_28_x86_64` wheel，新增 NVIDIA DKMS 驅動套件 vs. 已載入版本、kernel、`pacman` 可升級套件三列）。Linux **刻意不做自動升級**（pacman rolling release／DKMS 需重開機／cu12-cu13 覆寫／nightly 不穩定） |
 | 2.4.0 | 2026-10-22 | 新增 **cuDNN 自動補檔**：`sync_cudnn.ps1`（提權工作本體）＋`register_cudnn_sync_task.ps1`（一次性註冊「AI Stack cuDNN Sync」）＋`check_stack.py --fix-cudnn`／`run_daily.ps1`（工作存在就自動觸發），解決「非提權行程不能寫 Program Files」的斷點 |
 | 2.3.0 | 2026-10-22 | 新增 **GPU 效能基準** `bench_gpu.py`（cuBLAS／cuDNN／cudnn.benchmark／SDPA／HF 基線＋本機基線表）；`check_stack.py --bench` 把基準放進報告；`auto_update.py --bench` 升級前後各跑一次並輸出 `bench_delta`；`run_daily.ps1 -Bench` 串起兩者 |

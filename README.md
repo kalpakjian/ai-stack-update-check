@@ -202,10 +202,78 @@ at the scheduled time, `StartWhenAvailable` runs it on the next wake.
 | General | transformers, datasets, accelerate, numpy, pandas | auto-upgrade |
 | Audio | torchaudio, torchcodec | auto-upgrade from PyPI |
 | PyTorch | torch, torchvision | auto-upgrade **only** when a matching Windows wheel exists for the running Python; uses the newest usable CUDA index |
-| Python | CPython | never automatic |
+| Python | CPython | never automatic — see [Why Python is never auto-upgraded](#why-python-is-never-auto-upgraded) |
 | Ollama | ollama | never automatic (service restart) |
 | CUDA-only | same torch version, newer CUDA build | never automatic (often a ~2 GB download) |
 | cuDNN | bundled with the torch wheel | never a separate upgrade — it only changes when the torch wheel changes |
+
+## Why Python is never auto-upgraded
+
+Python is the one component this tool reports but never changes. On 2026-11-07
+that rule was re-tested against **Python 3.15.2**, and the answer was:
+*installable, but not worth it.* The evidence matters, because "we don't upgrade
+Python" is only a good rule if it survives being checked.
+
+### It is not blocked
+
+`check_stack.py` reported "3.15.2 available (torch supports cp315)". Resolving the
+whole ComfyUI `requirements.txt` against a real CPython 3.15.2 venv succeeds:
+
+```
+$ uv venv --python 3.15 /tmp/p
+Using CPython 3.15.2
+$ uv pip install --dry-run -r requirements.txt --python /tmp/p/bin/python \
+    --index-url https://download.pytorch.org/whl/cu134 \
+    --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match
+ + torch==2.15.0+cu134
+ + torchvision==0.29.2+cu134
+ + triton==3.9.0
+RESOLVE_EXIT=0
+```
+
+Two things that *look* like blockers but are not:
+
+| Looks like a blocker | Reality |
+|---|---|
+| `cupti-python` has no `cp315` wheel (max `cp313`, no sdist) | torch's own metadata reads `cupti-python==13.4.0; platform_system == "Linux" and python_version < "3.15"` — upstream already drops it on 3.15 |
+| `torch` / `torchvision` / `torchaudio` look ABI-pinned | since 2.11 they ship `py3-none` wheels, so the CPython ABI is no longer a factor |
+
+### Why it is still not worth it
+
+**1. No performance gain.** GPU throughput is set by driver > cuDNN > wheel.
+Every number in this repo was measured on 3.12 and would not move.
+
+**2. A venv rebuild re-resolves everything, not just Python.** `requirements.txt`
+is loosely pinned, so a fresh resolve jumps versions nobody asked for:
+
+| Package | now (3.12 venv) | resolves for 3.15 |
+|---|---|---|
+| pillow | 12.3.0 | **13.0.0** (major) |
+| sqlalchemy | 2.0.53 | **2.1.8** |
+| pydantic | 2.13.5 | 2.14.3 |
+| aiohttp | 3.14.3 | 3.14.5 |
+
+**3. Two dependencies must be built from source** (no `cp315` wheel yet), and the
+cost is paid on *every* rebuild:
+
+| Package | `cp315` wheel | sdist | Consequence |
+|---|---|---|---|
+| `kornia-rs` 0.1.14 | no (max `cp314t`) | yes | needs a **Rust** toolchain |
+| `pyyaml` 6.0.3 | no | yes | needs a C compiler |
+
+`kornia-rs` is a hard requirement of `kornia`, and ComfyUI imports `kornia` in
+three node modules (Canny, morphology, post-processing).
+
+**4. It invalidates the verification baseline.** The 22-check audit output and
+every benchmark figure would have to be re-measured and re-documented.
+
+### When to revisit
+
+All three at once:
+
+1. `kornia-rs` and `pyyaml` publish **`cp315` wheels** (wheel-only install)
+2. there is an actual requirement — some package that only supports 3.15
+3. you accept re-baselining the audit and benchmark numbers
 
 ## cuDNN (readiness, not updates)
 
@@ -402,9 +470,16 @@ The Linux setup that motivated these tools keeps two isolated venvs next to
 ComfyUI — a stable one and a nightly one:
 
 ```
-~/Projects/ComfyUI/.venv           torch 2.14.1+cu132        (stable, PyPI release)
-~/Projects/ComfyUI/.venv-nightly   torch 2.16.0.dev…+cu134   (nightly, cu134 index)
+~/Projects/ComfyUI/.venv           torch 2.15.0+cu134       (stable, release)
+~/Projects/ComfyUI/.venv-nightly   torch 2.16.0.dev…+cu134  (nightly, cu134 index)
 ```
+
+Both venvs sit on the same **CUDA 13.4** runtime (`cuda-toolkit 13.4.1.0`, cuDNN
+9.26.0.51); the only difference is release vs. nightly torch. The stable venv
+started on cu132 — moving it to cu134 was the only way to get a coherent
+torch / torchvision / torchaudio triple (see
+[Why Python is never auto-upgraded](#why-python-is-never-auto-upgraded) for how
+the same index/version traps show up elsewhere).
 
 They must not be mixed: the `cu12` and `cu13` NVIDIA wheels install to
 **overlapping paths** (`nvidia/nccl/lib/libnccl.so.2`), so an upgrade in one venv
@@ -486,11 +561,12 @@ So the Linux job **checks and notifies**; the upgrade stays a human decision.
 
 | Component | Version |
 |---|---|
-| OS | Omarchy (Arch), kernel 7.2.8-9-omarchy, Hyprland/Wayland |
+| OS | Omarchy (Arch), kernel 7.2.15-1-omarchy, Hyprland/Wayland |
 | Python | 3.12.14 |
-| torch stable / nightly | 2.14.1+cu132 / 2.16.0.dev20261025+cu134 |
-| torchvision | 0.29.1+cu132 / 0.30.0.dev20261025+cu134 |
-| cuDNN | 9.24.0 (stable) / 9.26.0.51 (nightly) |
+| torch stable / nightly | 2.15.0+cu134 / 2.16.0.dev20261025+cu134 |
+| torchvision | 0.29.2+cu134 / 0.30.0.dev20261025+cu134 |
+| triton | 3.9.0 / 3.9.0 |
+| cuDNN | 9.26.0.51 (stable) / 9.26.0.51 (nightly) |
 | NVIDIA driver | `nvidia-open-dkms` 615.78.08 (running 615.78.08) |
 | TensorRT | 11.3.0.99 (nightly only, `cu13` wheel) |
 | GPU | NVIDIA GeForce RTX 4090, driver 615.78.08, CUDA UMD 13.4 |
@@ -521,8 +597,15 @@ installing it.
   `CUDNN_PROBLEM: <status>` (plus a toast) when cuDNN is unusable. System-level
   cuDNN installs (`C:\Program Files\NVIDIA\CUDNN\...`, CUDA toolkit `bin\x64`)
   are ignored by PyTorch — only `torch\lib` matters.
-- **Python is never auto-upgraded** — it cannot be done with pip, and torch may
-  not support the new interpreter yet.
+- **Python is never auto-upgraded** — it cannot be done with pip, torch may not
+  support the new interpreter yet, and a venv rebuild re-resolves every other
+  package too. Measured case study for 3.15:
+  [Why Python is never auto-upgraded](#why-python-is-never-auto-upgraded).
+- **A "latest version" from PyPI is not the same as an installable build on your
+  CUDA index.** `check_stack.py` reports PyPI's newest, but `torch 2.15.0` can
+  only be installed from a CUDA index, and `${cu}/torchvision` tops out at a
+  different version than PyPI does. Always follow up with
+  `uv pip install --dry-run` against the index you actually use.
 - **PowerShell + git:** `git push` writes progress to stderr; PowerShell may show
   it as an error even when the push succeeded. Check `git ls-remote` instead.
 - **Linux: the driver needs a reboot.** `nvidia-open-dkms` is a DKMS package —
@@ -581,4 +664,29 @@ cu12 孤兒套件；`trim_tensorrt_resources.py` 把 TensorRT 永遠不會載入
 `notify-send` 送桌面通知。Linux 這邊**刻意不做自動升級**：pacman 是 rolling
 release（partial upgrade 會弄壞系統）、驅動是 DKMS 套件（升級要重開機）、
 cu12/cu13 會互相覆寫、nightly 本身就不穩定——所以只檢查與通知，升級留給人決定。
+
+### 為什麼 Python 永遠不自動升級
+
+工具會回報 Python 有新版本，但永遠不會幫你升。2026-11-07 拿 **Python 3.15.2**
+實測過一次，結論是「**裝得起來，但不划算**」：
+
+**先說「不是不能」。** 用 uv 拉真正的 CPython 3.15.2 建臨時 venv，再解析完整的
+ComfyUI `requirements.txt`，結果 `RESOLVE_EXIT=0`（torch 2.15.0+cu134、triton 3.9.0
+全部解得出來）。兩個看起來像阻擋的其實不是：
+
+- `cupti-python` 沒有 cp315 wheel → 但 torch 的依賴條件自己寫了
+  `python_version < "3.15"`，3.15 上根本不裝
+- torch 系列看起來綁 CPython ABI → 從 2.11 起已改成 `py3-none` wheel
+
+**但還是不值得：**
+
+1. **零效能收益**——GPU 吞吐量取決於 driver ＞ cuDNN ＞ wheel，跟 Python 版本無關
+2. **重建 venv 會順便跳版本**（`requirements.txt` 釘得鬆）：pillow 12.3.0 → **13.0.0**、
+   sqlalchemy 2.0.53 → **2.1.8**、pydantic 2.13.5 → 2.14.3
+3. **兩個套件得從原始碼編譯**（3.15 太新、wheel 沒跟上）：`kornia-rs` 要 Rust
+   toolchain、`pyyaml` 要 C 編譯器，而且**每次重建都要重編一次**
+4. **會作廢驗證基線**——22 項稽核輸出與所有效能數字都要重跑重寫
+
+**什麼時候再回來看？** 三個條件同時成立：`kornia-rs` 與 `pyyaml` 都出 cp315 wheel、
+有實際需求、且願意重跑基線。
 
