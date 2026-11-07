@@ -399,6 +399,26 @@ def pacman_outdated():
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def _parse_nvrm_version(text):
+    """從 /proc/driver/nvidia/version 抓「目前實際載入」的驅動版本。
+
+    實際格式（Arch 的 open kernel module）：
+
+        NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  615.78.08  Release Build
+        GCC version:  gcc version 16.2.1 20260810 (GCC)
+
+    注意 ``Kernel Module`` 後面接的是 ``for x86_64``，版本號還在更後面，
+    所以不能寫成 ``r"Kernel Module\\s+([\\d.]+)"`` —— 那樣永遠不會命中，
+    而「抓不到」會讓「驅動套件版本 vs 已載入版本」的比較靜默退化成
+    「up to date」，把「升級後還沒重開機」這個狀況整個藏起來。
+    """
+    for line in text.splitlines():
+        if line.startswith("NVRM version:"):
+            m = re.search(r"(\d+\.\d+(?:\.\d+)?)\s", line)
+            return m.group(1) if m else None
+    return None
+
+
 def linux_extra():
     """Linux/Arch 專屬資訊：NVIDIA 驅動套件、實際載入的驅動、核心、可升級系統套件。
 
@@ -416,11 +436,17 @@ def linux_extra():
             break
     try:
         with open("/proc/driver/nvidia/version", encoding="utf-8", errors="ignore") as fh:
-            m = re.search(r"Kernel Module\s+([\d.]+)", fh.read())
-            if m:
-                out["driver_running"] = m.group(1)
+            ver = _parse_nvrm_version(fh.read())
+            if ver:
+                out["driver_running"] = ver
     except OSError:
         pass
+    if "driver_running" not in out:
+        # 退回 nvidia-smi（同樣反映已載入的核心模組版本）
+        smi = run_cmd(["nvidia-smi", "--query-gpu=driver_version",
+                       "--format=csv,noheader"], timeout=15)
+        if smi and smi.strip():
+            out["driver_running"] = smi.strip().splitlines()[0].strip()
     out["outdated_packages"] = pacman_outdated()
     return out
 

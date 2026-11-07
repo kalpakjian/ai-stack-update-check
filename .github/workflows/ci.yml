@@ -98,5 +98,20 @@ jobs:
           python scripts/linux/trim_tensorrt_resources.py --venv /tmp/fakevenv --restore
           test -e /tmp/fakevenv/lib/python3.12/site-packages/tensorrt_libs/libnvinfer_builder_resource_win_sm89.so.11.3.0
 
+      - name: NVIDIA driver version parser (regression)
+        run: |
+          cat > /tmp/test_nvrm.py <<'EOF'
+          import sys
+          sys.path.insert(0, "scripts")
+          from check_stack import _parse_nvrm_version as parse
+          # 真實 Arch open-kernel-module 格式：版本號在 "for x86_64" 之後
+          real = "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  615.78.08  Release Build  (root@omarchy)  \nGCC version:  gcc version 16.2.1 20260810 (GCC) \n"
+          assert parse(real) == "615.78.08", parse(real)
+          assert parse("NVRM version: x  550.54  a\n") == "550.54"
+          assert parse("nothing here\n") is None
+          print("driver version parser ok")
+          EOF
+          python /tmp/test_nvrm.py
+
       - name: audit_venv.py --help
         run: python scripts/linux/audit_venv.py --help
