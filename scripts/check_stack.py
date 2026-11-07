@@ -539,7 +539,10 @@ def build_report(local, remote, runtime=None, runtime_detail=None, bench=None, f
     torch_max = remote.get("torch_max_python")
     py_status = "not checked" if offline else compare_status(py_inst, py_latest)
     blocked = False
-    if py_status == "update available" and torch_max and vparse(py_latest) > vparse(torch_max):
+    # 只比 major.minor：torch 的支援上限是「Python 3.15」（cp315 tag），
+    # 3.15.2 這種 patch 版仍然是 3.15，不能算超出版圖。
+    if py_status == "update available" and torch_max \
+            and vparse(py_latest)[:2] > vparse(torch_max)[:2]:
         py_status = "newer exists (torch max %s)" % torch_max
         blocked = True
         notes.append(
